@@ -197,10 +197,15 @@ class MACrossoverConfig:
     # 연속 신호 필터 (같은 신호 연속 발생 시 무시)
     signal_cooldown: int = int(os.getenv("SIGNAL_COOLDOWN", "5"))     # 신호 간 최소 간격 (분)
     
+    # 종목 그룹 (초기값 None, __post_init__에서 설정)
+    COSMETICS_STOCKS: dict = None
+    AI_STOCKS: dict = None
+    
     def __post_init__(self):
+        # ========================================
+        # 화장품 관련 종목 (Cosmetics Stocks)
+        # ========================================
         if self.COSMETICS_STOCKS is None:
-            # 화장품 관련 종목 리스트
-            # Cosmetics-related stock list
             self.COSMETICS_STOCKS = {
                 "090430": "아모레퍼시픽",      # Amorepacific
                 "051900": "LG생활건강",        # LG H&H
@@ -213,20 +218,68 @@ class MACrossoverConfig:
                 "214420": "토니모리",          # Tony Moly
                 "241710": "코스메카코리아",    # Cosmecca Korea
             }
+        
+        # ========================================
+        # AI 관련 종목 (AI-related Stocks)
+        # ========================================
+        if self.AI_STOCKS is None:
+            self.AI_STOCKS = {
+                "039030": "이오테크닉스",      # EO Technics - AI semiconductor laser
+                "403870": "HPSP",              # AI semiconductor equipment
+                "348210": "넥스틴",            # Nextin - wafer inspection
+                "322310": "오로스테크놀로지",  # Orros Tech - 3D measurement
+                "377480": "마인즈랩",          # MINDs Lab - AI voice/chatbot
+                "352480": "씨이랩",            # CE Lab - AI video analysis
+                "054800": "아이디스",          # IDIS - AI security
+                "950160": "코난테크놀로지",    # Konan Tech - AI search/NLP
+                "067310": "하나마이크론",      # Hana Micron - AI semiconductor packaging
+                "226330": "신테카바이오",      # Syntekabio - AI drug discovery
+            }
     
-    def get_stock_list(self) -> list:
+    def get_stocks(self, group: str = "cosmetics") -> dict:
+        """
+        종목 그룹별 종목 딕셔너리 반환
+        Return stock dictionary by group
+        
+        Args:
+            group: "cosmetics", "ai", "all"
+        
+        Returns:
+            dict: {종목코드: 종목명}
+        """
+        if group == "cosmetics":
+            return self.COSMETICS_STOCKS
+        elif group == "ai":
+            return self.AI_STOCKS
+        elif group == "all":
+            # 모든 종목 합치기
+            all_stocks = {}
+            all_stocks.update(self.COSMETICS_STOCKS)
+            all_stocks.update(self.AI_STOCKS)
+            return all_stocks
+        else:
+            # 커스텀 그룹 (환경변수에서 로드 가능)
+            return self.COSMETICS_STOCKS
+    
+    def get_stock_list(self, group: str = "cosmetics") -> list:
         """
         종목 코드 리스트 반환
         Return list of stock codes
         """
-        return list(self.COSMETICS_STOCKS.keys())
+        return list(self.get_stocks(group).keys())
     
     def get_stock_name(self, code: str) -> str:
         """
         종목 코드로 종목명 조회
         Get stock name by code
         """
-        return self.COSMETICS_STOCKS.get(code, code)
+        # 모든 그룹에서 검색
+        all_stocks = self.get_stocks("all")
+        return all_stocks.get(code, code)
+    
+    def get_available_groups(self) -> list:
+        """사용 가능한 종목 그룹 리스트"""
+        return ["cosmetics", "ai", "all"]
 
 
 # 전역 설정 인스턴스 생성

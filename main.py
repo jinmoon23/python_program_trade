@@ -412,22 +412,36 @@ def run_once():
         print(f"   ❌ 조건 미충족 (트리거까지 {diff:,}원 추가 하락 필요)")
 
 
-def run_ma_crossover():
+def run_ma_crossover(stock_group: str = "cosmetics"):
     """
-    MA 크로스오버 전략 일회 실행 (화장품 관련주)
-    Run MA Crossover Strategy once for cosmetics stocks
+    MA 크로스오버 전략 일회 실행
+    Run MA Crossover Strategy once
+    
+    Args:
+        stock_group: 종목 그룹 ("cosmetics", "ai", "all")
     """
     setup_logging()
     
     logger = logging.getLogger(__name__)
     
+    # 종목 그룹 이름 매핑
+    group_names = {
+        "cosmetics": "화장품 관련주",
+        "ai": "AI 관련주",
+        "all": "전체 종목 (화장품 + AI)"
+    }
+    group_display = group_names.get(stock_group, stock_group)
+    
+    # 종목 리스트 가져오기
+    stock_list = ma_config.get_stocks(stock_group)
+    
     print("\n" + "=" * 60)
-    print("📊 MA 크로스오버 전략 - 화장품 관련주 분석")
+    print(f"📊 MA 크로스오버 전략 - {group_display} 분석")
     print("=" * 60)
     
     # 대상 종목 출력
-    print("\n🎯 대상 종목:")
-    for code, name in ma_config.COSMETICS_STOCKS.items():
+    print(f"\n🎯 대상 종목 ({len(stock_list)}개):")
+    for code, name in stock_list.items():
         print(f"   [{code}] {name}")
     print()
     
@@ -437,8 +451,8 @@ def run_ma_crossover():
         print("❌ API 연결 실패!")
         return
     
-    # 전략 생성 및 실행
-    strategy = MovingAverageCrossoverStrategy(client)
+    # 전략 생성 및 실행 (종목 리스트 전달)
+    strategy = MovingAverageCrossoverStrategy(client, stock_list=stock_list)
     strategy.start()
     
     # 배치 분석 실행 (분봉/일봉 자동 선택)
@@ -497,10 +511,13 @@ def run_ma_scheduler():
         logger.info("\n👋 스케줄러 종료")
 
 
-def run_ma_minute():
+def run_ma_minute(stock_group: str = "cosmetics"):
     """
     분봉 MA 크로스오버 전략 연속 실행
     Run minute-based MA Crossover Strategy continuously
+    
+    Args:
+        stock_group: 종목 그룹 ("cosmetics", "ai", "all")
     
     장 운영시간(09:00~15:30) 동안 지정된 간격으로 분석 실행
     Runs analysis at specified intervals during market hours
@@ -511,8 +528,19 @@ def run_ma_minute():
     
     logger = logging.getLogger(__name__)
     
+    # 종목 그룹 이름 매핑
+    group_names = {
+        "cosmetics": "화장품 관련주",
+        "ai": "AI 관련주",
+        "all": "전체 종목 (화장품 + AI)"
+    }
+    group_display = group_names.get(stock_group, stock_group)
+    
+    # 종목 리스트 가져오기
+    stock_list = ma_config.get_stocks(stock_group)
+    
     print("\n" + "=" * 60)
-    print("📊 분봉 MA 크로스오버 전략 (연속 실행)")
+    print(f"📊 분봉 MA 크로스오버 전략 (연속 실행) - {group_display}")
     print(f"   차트: {ma_config.chart_period}분봉")
     print(f"   분석 간격: {ma_config.analysis_interval}초")
     print(f"   배치 크기: {ma_config.batch_size}개씩")
@@ -520,8 +548,8 @@ def run_ma_minute():
     print("=" * 60)
     
     # 대상 종목 출력
-    print("\n🎯 대상 종목:")
-    for code, name in ma_config.COSMETICS_STOCKS.items():
+    print(f"\n🎯 대상 종목 ({len(stock_list)}개):")
+    for code, name in stock_list.items():
         print(f"   [{code}] {name}")
     print()
     
@@ -531,8 +559,8 @@ def run_ma_minute():
         print("❌ API 연결 실패!")
         return
     
-    # 전략 생성
-    strategy = MovingAverageCrossoverStrategy(client)
+    # 전략 생성 (종목 리스트 전달)
+    strategy = MovingAverageCrossoverStrategy(client, stock_list=stock_list)
     strategy.start()
     
     def is_market_hours() -> bool:
@@ -610,6 +638,13 @@ if __name__ == "__main__":
         action="store_true",
         help="분봉 MA 크로스오버 전략 연속 실행 (Run minute MA Crossover continuously)"
     )
+    parser.add_argument(
+        "--stocks",
+        type=str,
+        choices=["cosmetics", "ai", "all"],
+        default="cosmetics",
+        help="종목 그룹 선택: cosmetics(화장품), ai(AI관련), all(전체) (Stock group selection)"
+    )
     
     args = parser.parse_args()
     
@@ -618,10 +653,10 @@ if __name__ == "__main__":
     elif args.once:
         run_once()
     elif args.ma:
-        run_ma_crossover()
+        run_ma_crossover(stock_group=args.stocks)
     elif args.ma_schedule:
         run_ma_scheduler()
     elif args.ma_minute:
-        run_ma_minute()
+        run_ma_minute(stock_group=args.stocks)
     else:
         run_bot()
