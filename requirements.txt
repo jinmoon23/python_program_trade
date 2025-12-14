@@ -1,0 +1,31 @@
+# KIS Open API 알고리즘 트레이딩 프로젝트 의존성
+# KIS Open API Algorithmic Trading Project Dependencies
+
+# 한국투자증권 Open API Python 라이브러리 (커뮤니티 최신 버전)
+# Korea Investment & Securities Open API Python Library (Community Latest)
+python-kis>=1.0.0
+
+# 비동기 처리를 위한 라이브러리
+# Async processing libraries
+aiohttp>=3.9.0
+websockets>=12.0
+
+# 환경 변수 관리
+# Environment variable management
+python-dotenv>=1.0.0
+
+# 로깅 및 유틸리티
+# Logging and utilities
+colorlog>=6.8.0
+
+# 데이터 처리 및 기술적 분석
+# Data processing and technical analysis
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 기술적 지표 계산 (Technical Indicators)
+# pandas-ta는 TA-Lib 없이도 이동평균선, RSI 등을 계산할 수 있습니다
+pandas-ta>=0.3.14b
+
+# 스케줄링 (Scheduling)
+schedule>=1.2.0

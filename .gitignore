@@ -1,0 +1,64 @@
+# 환경 변수 파일 (절대 커밋하지 마세요!)
+# Environment files (NEVER commit!)
+.env
+.env.local
+.env.*.local
+
+# API 토큰 파일
+# API token files
+kis_token.json
+*.token
+
+# Python 캐시
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 가상환경
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE 설정
+# IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 로그 파일
+# Log files
+*.log
+logs/
+
+# OS 파일
+# OS files
+.DS_Store
+Thumbs.db
+
+# 테스트 및 커버리지
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
