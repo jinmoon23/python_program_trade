@@ -305,6 +305,99 @@ class MACrossoverConfig:
 
 
 @dataclass
+class DualMomentumVolatilityConfig:
+    """
+    듀얼 모멘텀 + 변동성 돌파 전략 설정
+    Dual Momentum + Volatility Breakout Strategy Configuration
+    
+    한국 시장 전체에 적용 가능한 범용 단기 모멘텀 전략
+    Universal short-term momentum strategy for Korean market
+    """
+    
+    # ========================================
+    # 종목 선별 설정 (Stock Selection)
+    # ========================================
+    # 유니버스 크기
+    universe_size: int = int(os.getenv("DMV_UNIVERSE_SIZE", "200"))  # 시총/거래대금 상위 N개
+    
+    # 상대 모멘텀 (Relative Momentum)
+    momentum_period: int = int(os.getenv("DMV_MOMENTUM_PERIOD", "20"))  # 모멘텀 계산 기간 (일)
+    momentum_top_pct: float = float(os.getenv("DMV_MOMENTUM_TOP_PCT", "0.2"))  # 상위 N% 선별
+    
+    # 절대 모멘텀 (Absolute Momentum)
+    ma_period: int = int(os.getenv("DMV_MA_PERIOD", "20"))  # 이평선 기간
+    
+    # 유동성 필터
+    min_trading_value: int = int(os.getenv("DMV_MIN_TRADING_VALUE", "10000000000"))  # 최소 거래대금 (100억)
+    
+    # 변동성 필터
+    min_volatility: float = float(os.getenv("DMV_MIN_VOLATILITY", "15.0"))  # 최소 변동성 %
+    max_volatility: float = float(os.getenv("DMV_MAX_VOLATILITY", "40.0"))  # 최대 변동성 %
+    
+    # 시가총액 필터 (작전주 회피)
+    min_market_cap: int = int(os.getenv("DMV_MIN_MARKET_CAP", "50000000000"))  # 최소 시총 (500억)
+    
+    # ========================================
+    # 진입 조건 (Entry Conditions)
+    # ========================================
+    # 변동성 돌파 계수
+    volatility_breakout_k: float = float(os.getenv("DMV_BREAKOUT_K", "0.5"))  # 돌파가 = 전일종가 + (고-저) × K
+    
+    # 거래량 조건
+    volume_multiplier: float = float(os.getenv("DMV_VOLUME_MULT", "1.5"))  # 평균 대비 거래량 배수
+    
+    # RSI 필터
+    rsi_period: int = int(os.getenv("DMV_RSI_PERIOD", "14"))
+    rsi_max: int = int(os.getenv("DMV_RSI_MAX", "70"))  # 과매수 회피
+    
+    # 진입 시간 제한
+    entry_start_time: str = os.getenv("DMV_ENTRY_START", "09:30")  # 진입 시작 시간
+    entry_end_time: str = os.getenv("DMV_ENTRY_END", "14:30")  # 진입 종료 시간
+    
+    # ========================================
+    # 청산 조건 (Exit Conditions)
+    # ========================================
+    # 익절 설정
+    take_profit_1: float = float(os.getenv("DMV_TP1", "3.0"))  # 1차 익절 % (50% 물량)
+    take_profit_2: float = float(os.getenv("DMV_TP2", "5.0"))  # 2차 익절 % (전량)
+    
+    # 손절 설정
+    stop_loss: float = float(os.getenv("DMV_STOP_LOSS", "-2.0"))  # 손절 %
+    
+    # 시간 청산
+    time_exit: str = os.getenv("DMV_TIME_EXIT", "15:20")  # 강제 청산 시간
+    
+    # ========================================
+    # 포지션 관리 (Position Management)
+    # ========================================
+    max_positions: int = int(os.getenv("DMV_MAX_POSITIONS", "5"))  # 최대 동시 보유 종목
+    position_size_pct: float = float(os.getenv("DMV_POSITION_SIZE", "20.0"))  # 종목당 투자 비중 %
+    order_quantity: int = int(os.getenv("DMV_ORDER_QTY", "1"))  # 기본 주문 수량
+    
+    # ========================================
+    # 리스크 관리 (Risk Management)
+    # ========================================
+    # 상한가 종목 회피
+    avoid_limit_up: bool = os.getenv("DMV_AVOID_LIMIT_UP", "true").lower() == "true"
+    limit_up_threshold: float = float(os.getenv("DMV_LIMIT_UP_THRESHOLD", "25.0"))  # 상한가 임박 %
+    
+    # 일일 손실 제한
+    daily_loss_limit: float = float(os.getenv("DMV_DAILY_LOSS_LIMIT", "-5.0"))  # 일일 최대 손실 %
+    
+    # ========================================
+    # 분석 설정 (Analysis Settings)
+    # ========================================
+    analysis_interval: int = int(os.getenv("DMV_ANALYSIS_INTERVAL", "60"))  # 분석 주기 (초)
+    
+    def __post_init__(self):
+        """설정 검증"""
+        if self.take_profit_1 >= self.take_profit_2:
+            raise ValueError("1차 익절은 2차 익절보다 작아야 합니다")
+        if self.stop_loss >= 0:
+            raise ValueError("손절은 음수여야 합니다")
+
+
+@dataclass
 class MomentumBreakoutConfig:
     """
     모멘텀 브레이크아웃 전략 설정 클래스
@@ -380,6 +473,7 @@ trading_config = TradingConfig()
 log_config = LogConfig()
 ma_config = MACrossoverConfig()
 momentum_config = MomentumBreakoutConfig()
+dmv_config = DualMomentumVolatilityConfig()
 
 
 def print_config_status():

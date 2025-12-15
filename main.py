@@ -20,12 +20,13 @@ import sys
 from datetime import datetime
 from typing import Optional, List
 
-from config import kis_config, trading_config, log_config, ma_config, print_config_status
+from config import kis_config, trading_config, log_config, ma_config, dmv_config, print_config_status
 from kis_client import KISClient
 from strategy import (
     BaseStrategy, SamsungDipBuyStrategy, SimplePrintStrategy, 
     TickData, MovingAverageCrossoverStrategy, MomentumEventStrategy
 )
+from strategy_dmv import DualMomentumVolatilityStrategy
 
 # ========================================
 # 로깅 설정 (Logging Setup)
@@ -867,6 +868,96 @@ def run_ma_minute(stock_group: str = "cosmetics"):
         logger.info(f"📊 총 분석 횟수: {analysis_count}회")
 
 
+def run_dual_momentum(universe: List[str] = None):
+    """
+    듀얼 모멘텀 + 변동성 돌파 전략 실행
+    Run Dual Momentum + Volatility Breakout Strategy
+    
+    Args:
+        universe: 종목 유니버스 (None이면 자동 생성)
+    """
+    import time
+    
+    setup_logging()
+    
+    logger = logging.getLogger(__name__)
+    
+    print("\n" + "=" * 60)
+    print("🚀 듀얼 모멘텀 + 변동성 돌파 전략")
+    print("   한국 시장 범용 단기 모멘텀 전략")
+    print("=" * 60)
+    print(f"\n⚙️ 전략 설정:")
+    print(f"   모멘텀 기간: {dmv_config.momentum_period}일")
+    print(f"   변동성 돌파 계수: {dmv_config.volatility_breakout_k}")
+    print(f"   익절: {dmv_config.take_profit_1}% / {dmv_config.take_profit_2}%")
+    print(f"   손절: {dmv_config.stop_loss}%")
+    print(f"   최대 포지션: {dmv_config.max_positions}개")
+    print(f"   진입 시간: {dmv_config.entry_start_time} ~ {dmv_config.entry_end_time}")
+    print(f"   시간 청산: {dmv_config.time_exit}")
+    print()
+    
+    # API 연결
+    client = KISClient()
+    if not client.connect():
+        print("❌ API 연결 실패!")
+        return
+    
+    # 전략 생성
+    strategy = DualMomentumVolatilityStrategy(client, universe=universe)
+    strategy.start()
+    
+    def is_market_hours() -> bool:
+        """장 운영시간 체크"""
+        now = datetime.now()
+        market_open = datetime.strptime(ma_config.market_open, "%H:%M").time()
+        market_close = datetime.strptime(ma_config.market_close, "%H:%M").time()
+        current_time = now.time()
+        
+        # 주말 체크
+        if now.weekday() >= 5:
+            return False
+        
+        return market_open <= current_time <= market_close
+    
+    # 장 시작 대기
+    logger.info("⏳ 장 시작 시간까지 대기 중...")
+    if not wait_for_market_open():
+        logger.info("장이 마감되었습니다. 프로그램을 종료합니다.")
+        strategy.stop()
+        return
+    
+    logger.info("🔔 장 시작! 듀얼 모멘텀 전략을 실행합니다!")
+    logger.info("✅ 전략 활성화됨")
+    logger.info(f"   분석 간격: {dmv_config.analysis_interval}초")
+    logger.info("   (Ctrl+C로 종료)")
+    
+    analysis_count = 0
+    
+    try:
+        while True:
+            if is_market_hours():
+                analysis_count += 1
+                logger.info(f"\n🔄 분석 #{analysis_count} 시작...")
+                
+                # 분석 실행
+                results = strategy.run_analysis()
+                
+                logger.info(f"   다음 분석까지 {dmv_config.analysis_interval}초 대기...")
+                time.sleep(dmv_config.analysis_interval)
+            else:
+                now = datetime.now()
+                logger.info(f"⏸️ 장외 시간 ({now.strftime('%H:%M')}) - 장 시작 대기...")
+                
+                if not wait_for_market_open():
+                    break
+                
+    except KeyboardInterrupt:
+        logger.info("\n👋 듀얼 모멘텀 전략 종료")
+        strategy.stop()
+        
+        logger.info(f"📊 총 분석 횟수: {analysis_count}회")
+
+
 if __name__ == "__main__":
     import argparse
     
@@ -904,6 +995,11 @@ if __name__ == "__main__":
         help="모멘텀 브레이크아웃 + 이벤트 드리븐 전략 (Momentum Breakout + Event-Driven Strategy)"
     )
     parser.add_argument(
+        "--dmv",
+        action="store_true",
+        help="듀얼 모멘텀 + 변동성 돌파 전략 (Dual Momentum + Volatility Breakout)"
+    )
+    parser.add_argument(
         "--all",
         action="store_true",
         dest="run_all",
@@ -931,6 +1027,8 @@ if __name__ == "__main__":
         run_ma_minute(stock_group=args.stocks)
     elif args.momentum:
         run_momentum_event(stock_group=args.stocks)
+    elif args.dmv:
+        run_dual_momentum()
     elif args.run_all:
         run_all_strategies()
     else:

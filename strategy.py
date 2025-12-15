@@ -16,7 +16,7 @@ from datetime import datetime
 from dataclasses import dataclass
 
 from kis_client import KISClient
-from config import trading_config, ma_config, momentum_config
+from config import trading_config, ma_config, momentum_config, dmv_config
 
 # 로거 설정
 # Logger setup
