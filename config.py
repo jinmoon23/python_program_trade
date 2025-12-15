@@ -200,6 +200,7 @@ class MACrossoverConfig:
     # 종목 그룹 (초기값 None, __post_init__에서 설정)
     COSMETICS_STOCKS: dict = None
     AI_STOCKS: dict = None
+    TECH_GIANTS: dict = None  # 대형 기술주
     
     def __post_init__(self):
         # ========================================
@@ -235,6 +236,24 @@ class MACrossoverConfig:
                 "067310": "하나마이크론",      # Hana Micron - AI semiconductor packaging
                 "226330": "신테카바이오",      # Syntekabio - AI drug discovery
             }
+        
+        # ========================================
+        # 대형 기술주 (Tech Giants)
+        # 삼성전자, SK하이닉스 등 반도체 대형주
+        # ========================================
+        if self.TECH_GIANTS is None:
+            self.TECH_GIANTS = {
+                "005930": "삼성전자",          # Samsung Electronics
+                "000660": "SK하이닉스",        # SK Hynix
+                "005935": "삼성전자우",        # Samsung Electronics Preferred
+                "005380": "현대차",            # Hyundai Motor
+                "000270": "기아",              # Kia
+                "035420": "NAVER",             # Naver
+                "035720": "카카오",            # Kakao
+                "006400": "삼성SDI",           # Samsung SDI
+                "373220": "LG에너지솔루션",   # LG Energy Solution
+                "051910": "LG화학",            # LG Chem
+            }
     
     def get_stocks(self, group: str = "cosmetics") -> dict:
         """
@@ -251,11 +270,14 @@ class MACrossoverConfig:
             return self.COSMETICS_STOCKS
         elif group == "ai":
             return self.AI_STOCKS
+        elif group == "tech":
+            return self.TECH_GIANTS
         elif group == "all":
             # 모든 종목 합치기
             all_stocks = {}
             all_stocks.update(self.COSMETICS_STOCKS)
             all_stocks.update(self.AI_STOCKS)
+            all_stocks.update(self.TECH_GIANTS)
             return all_stocks
         else:
             # 커스텀 그룹 (환경변수에서 로드 가능)
@@ -279,7 +301,76 @@ class MACrossoverConfig:
     
     def get_available_groups(self) -> list:
         """사용 가능한 종목 그룹 리스트"""
-        return ["cosmetics", "ai", "all"]
+        return ["cosmetics", "ai", "tech", "all"]
+
+
+@dataclass
+class MomentumBreakoutConfig:
+    """
+    모멘텀 브레이크아웃 전략 설정 클래스
+    Momentum Breakout Strategy Configuration
+    
+    대형 기술주(삼성전자, SK하이닉스) 대상 추세 추종 전략
+    Trend-following strategy for tech giants
+    """
+    
+    # ========================================
+    # 브레이크아웃 설정 (Breakout Settings)
+    # ========================================
+    breakout_period: int = int(os.getenv("BREAKOUT_PERIOD", "20"))       # N일 고가 돌파 기준
+    breakdown_period: int = int(os.getenv("BREAKDOWN_PERIOD", "10"))     # N일 저가 이탈 기준
+    
+    # ADX 설정 (추세 강도)
+    adx_period: int = int(os.getenv("ADX_PERIOD", "14"))                 # ADX 기간
+    adx_threshold: int = int(os.getenv("ADX_THRESHOLD", "25"))           # 추세 진입 ADX 기준
+    
+    # ATR 설정 (변동성 기반 손절)
+    atr_period: int = int(os.getenv("ATR_PERIOD", "14"))                 # ATR 기간
+    atr_multiplier: float = float(os.getenv("ATR_MULTIPLIER", "2.0"))    # ATR 배수 (손절폭)
+    
+    # 거래량 필터
+    volume_breakout_multiplier: float = float(os.getenv("VOLUME_BREAKOUT_MULT", "1.5"))  # 돌파 시 거래량 배수
+    
+    # 트레일링 스탑
+    use_trailing_stop: bool = os.getenv("USE_TRAILING_STOP", "true").lower() == "true"
+    trailing_stop_pct: float = float(os.getenv("TRAILING_STOP_PCT", "2.0"))  # 트레일링 스탑 %
+    
+    # 주문 설정
+    order_quantity: int = int(os.getenv("MOMENTUM_ORDER_QTY", "1"))
+    max_positions: int = int(os.getenv("MAX_POSITIONS", "5"))            # 최대 동시 보유 종목 수
+    
+    # ========================================
+    # 이벤트 드리븐 설정 (Event-Driven Settings)
+    # ========================================
+    use_event_driven: bool = os.getenv("USE_EVENT_DRIVEN", "true").lower() == "true"
+    
+    # 긍정적 키워드 (매수 신호)
+    positive_keywords: list = None
+    
+    # 부정적 키워드 (즉시 청산)
+    negative_keywords: list = None
+    
+    # 거래량 급등 기준 (뉴스 발생 시)
+    news_volume_spike: float = float(os.getenv("NEWS_VOLUME_SPIKE", "3.0"))  # 평균 대비 배수
+    
+    # 뉴스 체크 간격 (초)
+    news_check_interval: int = int(os.getenv("NEWS_CHECK_INTERVAL", "60"))
+    
+    def __post_init__(self):
+        if self.positive_keywords is None:
+            self.positive_keywords = [
+                "실적 호조", "어닝 서프라이즈", "목표가 상향", "매수 추천",
+                "HBM", "AI 반도체", "수주", "계약 체결", "신규 투자",
+                "배당 확대", "자사주 매입", "주주환원", "최대 실적",
+                "수출 증가", "점유율 확대", "신제품", "기술 혁신"
+            ]
+        
+        if self.negative_keywords is None:
+            self.negative_keywords = [
+                "실적 부진", "어닝 쇼크", "목표가 하향", "매도 의견",
+                "적자 전환", "감산", "구조조정", "소송", "제재",
+                "리콜", "사고", "횡령", "배임", "수사", "압수수색"
+            ]
 
 
 # 전역 설정 인스턴스 생성
@@ -288,6 +379,7 @@ kis_config = KISConfig()
 trading_config = TradingConfig()
 log_config = LogConfig()
 ma_config = MACrossoverConfig()
+momentum_config = MomentumBreakoutConfig()
 
 
 def print_config_status():

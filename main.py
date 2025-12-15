@@ -24,7 +24,7 @@ from config import kis_config, trading_config, log_config, ma_config, print_conf
 from kis_client import KISClient
 from strategy import (
     BaseStrategy, SamsungDipBuyStrategy, SimplePrintStrategy, 
-    TickData, MovingAverageCrossoverStrategy
+    TickData, MovingAverageCrossoverStrategy, MomentumEventStrategy
 )
 
 # ========================================
@@ -511,6 +511,266 @@ def run_ma_scheduler():
         logger.info("\n👋 스케줄러 종료")
 
 
+def wait_for_market_open():
+    """
+    장 시작 시간까지 대기
+    Wait until market opens
+    """
+    import time
+    
+    logger = logging.getLogger(__name__)
+    
+    while True:
+        now = datetime.now()
+        market_open = datetime.strptime(ma_config.market_open, "%H:%M").time()
+        market_close = datetime.strptime(ma_config.market_close, "%H:%M").time()
+        current_time = now.time()
+        
+        # 주말 체크
+        if now.weekday() >= 5:
+            logger.info(f"📅 주말입니다. 월요일 장 시작을 기다립니다...")
+            time.sleep(3600)  # 1시간 대기
+            continue
+        
+        # 장 운영 중이면 바로 시작
+        if market_open <= current_time <= market_close:
+            return True
+        
+        # 장 시작 전이면 대기
+        if current_time < market_open:
+            # 남은 시간 계산
+            now_dt = datetime.combine(now.date(), current_time)
+            open_dt = datetime.combine(now.date(), market_open)
+            remaining = (open_dt - now_dt).total_seconds()
+            
+            if remaining <= 60:
+                logger.info(f"⏰ 장 시작까지 {int(remaining)}초 남음...")
+                time.sleep(remaining)
+                logger.info("🔔 장이 시작되었습니다!")
+                return True
+            elif remaining <= 300:  # 5분 이내
+                logger.info(f"⏰ 장 시작까지 {int(remaining/60)}분 {int(remaining%60)}초 남음...")
+                time.sleep(10)
+            else:
+                minutes = int(remaining / 60)
+                logger.info(f"⏰ 장 시작까지 {minutes}분 남음... ({ma_config.market_open} 시작)")
+                time.sleep(60)
+        else:
+            # 장 마감 후
+            logger.info(f"📴 장이 마감되었습니다. 내일 장 시작을 기다립니다...")
+            return False
+
+
+def run_momentum_event(stock_group: str = "tech", auto_start: bool = True):
+    """
+    모멘텀 브레이크아웃 + 이벤트 드리븐 전략 실행
+    Run Momentum Breakout + Event-Driven Strategy
+    
+    Args:
+        stock_group: 종목 그룹 ("tech", "cosmetics", "ai", "all")
+        auto_start: 장 시작 시 자동 실행 여부
+    """
+    import time
+    
+    setup_logging()
+    
+    logger = logging.getLogger(__name__)
+    
+    # 종목 그룹 이름 매핑
+    group_names = {
+        "tech": "대형 기술주 (삼성전자, SK하이닉스 등)",
+        "cosmetics": "화장품 관련주",
+        "ai": "AI 관련주",
+        "all": "전체 종목"
+    }
+    group_display = group_names.get(stock_group, stock_group)
+    
+    # 종목 리스트 가져오기
+    stock_list = ma_config.get_stocks(stock_group)
+    
+    print("\n" + "=" * 60)
+    print(f"🚀 모멘텀 브레이크아웃 + 이벤트 드리븐 전략")
+    print(f"   대상: {group_display}")
+    print(f"   장 시작 시간: {ma_config.market_open}")
+    print(f"   장 마감 시간: {ma_config.market_close}")
+    print("=" * 60)
+    
+    # 대상 종목 출력
+    print(f"\n🎯 대상 종목 ({len(stock_list)}개):")
+    for code, name in stock_list.items():
+        print(f"   [{code}] {name}")
+    print()
+    
+    # API 연결
+    client = KISClient()
+    if not client.connect():
+        print("❌ API 연결 실패!")
+        return
+    
+    # 전략 생성
+    strategy = MomentumEventStrategy(client, stock_list=stock_list)
+    strategy.start()
+    
+    def is_market_hours() -> bool:
+        """장 운영시간 체크"""
+        now = datetime.now()
+        market_open = datetime.strptime(ma_config.market_open, "%H:%M").time()
+        market_close = datetime.strptime(ma_config.market_close, "%H:%M").time()
+        current_time = now.time()
+        
+        # 주말 체크
+        if now.weekday() >= 5:
+            return False
+        
+        return market_open <= current_time <= market_close
+    
+    # 장 시작 대기 (auto_start가 True일 때)
+    if auto_start:
+        logger.info("⏳ 장 시작 시간까지 대기 중...")
+        if not wait_for_market_open():
+            logger.info("장이 마감되었습니다. 프로그램을 종료합니다.")
+            strategy.stop()
+            return
+        
+        # 장 시작 직후 즉시 첫 분석 실행
+        logger.info("🔔 장 시작! 즉시 첫 분석을 실행합니다!")
+    
+    logger.info("✅ 모멘텀 + 이벤트 전략 활성화됨")
+    logger.info(f"   분석 간격: {ma_config.analysis_interval}초")
+    logger.info("   (Ctrl+C로 종료)")
+    
+    analysis_count = 0
+    
+    try:
+        while True:
+            if is_market_hours():
+                analysis_count += 1
+                logger.info(f"\n🔄 분석 #{analysis_count} 시작...")
+                
+                # 분석 실행
+                results = strategy.run_analysis()
+                
+                logger.info(f"   다음 분석까지 {ma_config.analysis_interval}초 대기...")
+                time.sleep(ma_config.analysis_interval)
+            else:
+                now = datetime.now()
+                logger.info(f"⏸️ 장외 시간 ({now.strftime('%H:%M')}) - 장 시작 대기...")
+                
+                # 장 시작 대기
+                if not wait_for_market_open():
+                    break
+                
+    except KeyboardInterrupt:
+        logger.info("\n👋 모멘텀 + 이벤트 전략 종료")
+        strategy.stop()
+        
+        logger.info(f"📊 총 분석 횟수: {analysis_count}회")
+
+
+def run_all_strategies():
+    """
+    모든 전략을 장 시작과 동시에 자동 실행
+    Run all strategies automatically at market open
+    
+    대형 기술주: 모멘텀 + 이벤트 드리븐
+    중소형주: MA 크로스오버
+    """
+    import time
+    import threading
+    
+    setup_logging()
+    
+    logger = logging.getLogger(__name__)
+    
+    print("\n" + "=" * 60)
+    print("🚀 통합 자동 트레이딩 시스템")
+    print("=" * 60)
+    print("\n실행할 전략:")
+    print("   1️⃣ 모멘텀 + 이벤트 드리븐 (대형 기술주)")
+    print("   2️⃣ MA 크로스오버 (화장품주)")
+    print("   3️⃣ MA 크로스오버 (AI주)")
+    print("=" * 60)
+    
+    # API 연결
+    client = KISClient()
+    if not client.connect():
+        print("❌ API 연결 실패!")
+        return
+    
+    # 전략들 생성
+    tech_stocks = ma_config.get_stocks("tech")
+    cosmetics_stocks = ma_config.get_stocks("cosmetics")
+    ai_stocks = ma_config.get_stocks("ai")
+    
+    strategies = [
+        ("모멘텀+이벤트 (대형기술주)", MomentumEventStrategy(client, stock_list=tech_stocks)),
+        ("MA크로스오버 (화장품주)", MovingAverageCrossoverStrategy(client, stock_list=cosmetics_stocks)),
+        ("MA크로스오버 (AI주)", MovingAverageCrossoverStrategy(client, stock_list=ai_stocks)),
+    ]
+    
+    print(f"\n📊 총 {len(strategies)}개 전략 준비 완료")
+    
+    # 장 시작 대기
+    logger.info("⏳ 장 시작 시간까지 대기 중...")
+    if not wait_for_market_open():
+        logger.info("장이 마감되었습니다. 프로그램을 종료합니다.")
+        return
+    
+    logger.info("🔔 장 시작! 모든 전략을 실행합니다!")
+    
+    # 모든 전략 시작
+    for name, strategy in strategies:
+        strategy.start()
+        logger.info(f"   ✅ {name} 활성화")
+    
+    def is_market_hours() -> bool:
+        now = datetime.now()
+        market_open = datetime.strptime(ma_config.market_open, "%H:%M").time()
+        market_close = datetime.strptime(ma_config.market_close, "%H:%M").time()
+        current_time = now.time()
+        if now.weekday() >= 5:
+            return False
+        return market_open <= current_time <= market_close
+    
+    analysis_count = 0
+    
+    try:
+        while True:
+            if is_market_hours():
+                analysis_count += 1
+                logger.info(f"\n{'='*60}")
+                logger.info(f"🔄 통합 분석 #{analysis_count} 시작...")
+                logger.info(f"{'='*60}")
+                
+                # 각 전략 순차 실행 (API Rate Limit 고려)
+                for name, strategy in strategies:
+                    logger.info(f"\n📊 [{name}] 분석 중...")
+                    
+                    if isinstance(strategy, MomentumEventStrategy):
+                        strategy.run_analysis()
+                    else:
+                        strategy.run_batch_analysis()
+                    
+                    # 전략 간 딜레이
+                    time.sleep(2)
+                
+                logger.info(f"\n   다음 분석까지 {ma_config.analysis_interval}초 대기...")
+                time.sleep(ma_config.analysis_interval)
+            else:
+                now = datetime.now()
+                logger.info(f"⏸️ 장외 시간 ({now.strftime('%H:%M')}) - 장 시작 대기...")
+                
+                if not wait_for_market_open():
+                    break
+                
+    except KeyboardInterrupt:
+        logger.info("\n👋 통합 트레이딩 시스템 종료")
+        for name, strategy in strategies:
+            strategy.stop()
+        
+        logger.info(f"📊 총 분석 횟수: {analysis_count}회")
+
+
 def run_ma_minute(stock_group: str = "cosmetics"):
     """
     분봉 MA 크로스오버 전략 연속 실행
@@ -639,11 +899,22 @@ if __name__ == "__main__":
         help="분봉 MA 크로스오버 전략 연속 실행 (Run minute MA Crossover continuously)"
     )
     parser.add_argument(
+        "--momentum",
+        action="store_true",
+        help="모멘텀 브레이크아웃 + 이벤트 드리븐 전략 (Momentum Breakout + Event-Driven Strategy)"
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="run_all",
+        help="모든 전략 장 시작과 동시 자동 실행 (Run ALL strategies at market open)"
+    )
+    parser.add_argument(
         "--stocks",
         type=str,
-        choices=["cosmetics", "ai", "all"],
-        default="cosmetics",
-        help="종목 그룹 선택: cosmetics(화장품), ai(AI관련), all(전체) (Stock group selection)"
+        choices=["cosmetics", "ai", "tech", "all"],
+        default="tech",
+        help="종목 그룹: tech(대형기술주), cosmetics(화장품), ai(AI), all(전체)"
     )
     
     args = parser.parse_args()
@@ -658,5 +929,10 @@ if __name__ == "__main__":
         run_ma_scheduler()
     elif args.ma_minute:
         run_ma_minute(stock_group=args.stocks)
+    elif args.momentum:
+        run_momentum_event(stock_group=args.stocks)
+    elif args.run_all:
+        run_all_strategies()
     else:
-        run_bot()
+        # 기본: 모멘텀 + 이벤트 전략 (대형 기술주)
+        run_momentum_event(stock_group="tech")

@@ -16,7 +16,7 @@ from datetime import datetime
 from dataclasses import dataclass
 
 from kis_client import KISClient
-from config import trading_config, ma_config
+from config import trading_config, ma_config, momentum_config
 
 # 로거 설정
 # Logger setup
@@ -522,16 +522,38 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         배치 기반 분석 실행 - Rate Limit 방지를 위해 배치로 처리
         Run batch-based analysis - Process in batches to avoid rate limits
         
-        분봉/일봉 모두 지원, 설정에 따라 자동 선택
-        Supports both minute and daily charts, auto-selected by config
+        하이브리드 접근법: 장 초기에는 일봉, 충분한 분봉 데이터 쌓이면 분봉 사용
+        Hybrid approach: Use daily chart early, switch to minute when data sufficient
         
         Returns:
             dict: 분석 결과 요약
         """
         import time
         
-        use_minute = ma_config.use_minute_chart
-        chart_type = f"{ma_config.chart_period}분봉" if use_minute else "일봉"
+        # ========================================
+        # 하이브리드 차트 선택 로직
+        # 장 시작 후 충분한 시간이 지나야 분봉 사용
+        # ========================================
+        now = datetime.now()
+        market_open_time = datetime.strptime(ma_config.market_open, "%H:%M").time()
+        market_open_dt = datetime.combine(now.date(), market_open_time)
+        minutes_since_open = (now - market_open_dt).total_seconds() / 60
+        
+        # 분봉 사용을 위한 최소 경과 시간 (long_ma + 여유 10분)
+        min_minutes_for_minute_chart = self.long_ma + 10
+        
+        # 자동 차트 타입 선택
+        if ma_config.use_minute_chart and minutes_since_open >= min_minutes_for_minute_chart:
+            use_minute = True
+            chart_type = f"{ma_config.chart_period}분봉"
+        else:
+            use_minute = False
+            if ma_config.use_minute_chart and minutes_since_open > 0:
+                remaining = int(min_minutes_for_minute_chart - minutes_since_open)
+                chart_type = f"일봉 (분봉 전환까지 약 {remaining}분)"
+                logger.info(f"   ⏳ 장 시작 후 {int(minutes_since_open)}분 경과 - 일봉으로 분석 중")
+            else:
+                chart_type = "일봉"
         
         logger.info("\n" + "=" * 60)
         logger.info(f"📊 MA 크로스오버 배치 분석 시작 ({chart_type})")
@@ -1143,6 +1165,602 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         # 최종 보유 포지션 출력
         if self._positions:
             logger.info(f"   📦 미청산 포지션: {len(self._positions)}개")
+
+
+# ============================================================
+# 모멘텀 브레이크아웃 + 이벤트 드리븐 전략
+# Momentum Breakout + Event-Driven Strategy
+# ============================================================
+
+class MomentumEventStrategy(BaseStrategy):
+    """
+    모멘텀 브레이크아웃 + 이벤트 드리븐 복합 전략
+    Momentum Breakout + Event-Driven Hybrid Strategy
+    
+    대형 기술주(삼성전자, SK하이닉스) 대상 강력한 추세 추종 전략
+    
+    전략 로직:
+    1. 모멘텀 브레이크아웃:
+       - N일 고가 돌파 + 거래량 > 평균 1.5배 + ADX > 25 → 매수
+       - N일 저가 이탈 OR 트레일링 스탑 → 매도
+    
+    2. 이벤트 드리븐:
+       - 긍정적 뉴스/공시 + 거래량 급등 → 모멘텀 매수 강화
+       - 부정적 뉴스/공시 → 즉시 청산 또는 진입 회피
+    
+    Strategy Logic:
+    1. Momentum Breakout:
+       - N-day high breakout + Volume > 1.5x avg + ADX > 25 → Buy
+       - N-day low breakdown OR trailing stop → Sell
+    
+    2. Event-Driven:
+       - Positive news + Volume spike → Enhance momentum buy
+       - Negative news → Immediate exit or avoid entry
+    """
+    
+    def __init__(
+        self,
+        client: KISClient,
+        stock_list: dict = None,
+    ):
+        """
+        모멘텀 + 이벤트 전략 초기화
+        Initialize Momentum + Event Strategy
+        """
+        super().__init__(client, name="MomentumEventStrategy")
+        
+        # 대상 종목 (기본: 대형 기술주)
+        self.stock_list = stock_list or ma_config.TECH_GIANTS
+        
+        # 설정값 로드
+        self.breakout_period = momentum_config.breakout_period
+        self.breakdown_period = momentum_config.breakdown_period
+        self.adx_period = momentum_config.adx_period
+        self.adx_threshold = momentum_config.adx_threshold
+        self.atr_period = momentum_config.atr_period
+        self.atr_multiplier = momentum_config.atr_multiplier
+        self.volume_multiplier = momentum_config.volume_breakout_multiplier
+        self.order_quantity = momentum_config.order_quantity
+        self.max_positions = momentum_config.max_positions
+        
+        # 트레일링 스탑
+        self.use_trailing_stop = momentum_config.use_trailing_stop
+        self.trailing_stop_pct = momentum_config.trailing_stop_pct
+        
+        # 이벤트 드리븐
+        self.use_event_driven = momentum_config.use_event_driven
+        self.positive_keywords = momentum_config.positive_keywords
+        self.negative_keywords = momentum_config.negative_keywords
+        self.news_volume_spike = momentum_config.news_volume_spike
+        
+        # 포지션 추적: {symbol: {entry_price, quantity, high_since_entry, stop_price}}
+        self._positions: Dict[str, Dict] = {}
+        
+        # 뉴스 캐시: {symbol: {timestamp, sentiment, keywords}}
+        self._news_cache: Dict[str, Dict] = {}
+        
+        # 매매 통계
+        self.signals_generated = 0
+        self.orders_placed = 0
+        self.breakout_entries = 0
+        self.event_entries = 0
+        self.trailing_stop_exits = 0
+        self.event_exits = 0
+        
+        logger.info("=" * 60)
+        logger.info("🚀 모멘텀 브레이크아웃 + 이벤트 드리븐 전략 설정:")
+        logger.info(f"   대상 종목: {len(self.stock_list)}개 대형 기술주")
+        logger.info(f"   브레이크아웃: {self.breakout_period}일 고가 돌파")
+        logger.info(f"   ADX 기준: > {self.adx_threshold}")
+        logger.info(f"   거래량 필터: > {self.volume_multiplier}x")
+        logger.info(f"   트레일링 스탑: {self.trailing_stop_pct}%")
+        logger.info(f"   이벤트 드리븐: {'활성화' if self.use_event_driven else '비활성화'}")
+        logger.info("=" * 60)
+    
+    def on_start(self):
+        """전략 시작"""
+        logger.info("🚀 모멘텀 + 이벤트 전략 시작...")
+        logger.info(f"   분석 대상: {list(self.stock_list.values())}")
+    
+    def on_tick(self, tick: TickData):
+        """실시간 틱 처리 - 트레일링 스탑 업데이트"""
+        if tick.symbol not in self._positions:
+            return
+        
+        pos = self._positions[tick.symbol]
+        
+        # 최고가 업데이트
+        if tick.price > pos.get("high_since_entry", 0):
+            pos["high_since_entry"] = tick.price
+            
+            # 트레일링 스탑 가격 업데이트
+            if self.use_trailing_stop:
+                new_stop = int(tick.price * (1 - self.trailing_stop_pct / 100))
+                if new_stop > pos.get("stop_price", 0):
+                    pos["stop_price"] = new_stop
+                    logger.debug(f"   📈 [{tick.symbol}] 트레일링 스탑 갱신: {new_stop:,}원")
+    
+    def run_analysis(self) -> Dict[str, Any]:
+        """
+        전체 분석 실행 - 배치 처리
+        Run full analysis with batch processing
+        """
+        import time
+        
+        logger.info("\n" + "=" * 60)
+        logger.info("📊 모멘텀 + 이벤트 분석 시작")
+        logger.info(f"   시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("=" * 60)
+        
+        results = {
+            "timestamp": datetime.now().isoformat(),
+            "stocks_analyzed": 0,
+            "breakout_signals": [],
+            "event_signals": [],
+            "exit_signals": [],
+            "orders_placed": [],
+            "errors": []
+        }
+        
+        for symbol, name in self.stock_list.items():
+            try:
+                logger.info(f"\n📈 [{symbol}] {name} 분석 중...")
+                time.sleep(0.5)  # API 호출 간격
+                
+                # 1. 일봉 데이터 조회
+                df = self.client.get_daily_prices_df(symbol, count=100)
+                
+                if df is None or len(df) < self.breakout_period:
+                    logger.warning(f"   ⚠️ 데이터 부족")
+                    results["errors"].append({"symbol": symbol, "error": "데이터 부족"})
+                    continue
+                
+                # 2. 기술적 지표 계산
+                indicators = self._calculate_momentum_indicators(df)
+                
+                if indicators is None:
+                    continue
+                
+                # 3. 현재 상태 출력
+                self._print_momentum_status(symbol, name, indicators)
+                
+                # 4. 이벤트(뉴스) 분석 (활성화된 경우)
+                event_sentiment = None
+                if self.use_event_driven:
+                    event_sentiment = self._analyze_event(symbol, name, indicators)
+                
+                # 5. 보유 중인 경우: 청산 조건 체크
+                if symbol in self._positions:
+                    exit_signal = self._check_exit_conditions(symbol, indicators, event_sentiment)
+                    if exit_signal:
+                        results["exit_signals"].append(exit_signal)
+                        order = self._execute_sell(symbol, name, indicators, exit_signal["reason"])
+                        if order:
+                            results["orders_placed"].append(order)
+                        continue
+                
+                # 6. 미보유 시: 진입 조건 체크
+                else:
+                    # 부정적 이벤트 시 진입 회피
+                    if event_sentiment == "NEGATIVE":
+                        logger.info(f"   ⚠️ 부정적 이벤트로 진입 회피")
+                        continue
+                    
+                    entry_signal = self._check_entry_conditions(symbol, indicators, event_sentiment)
+                    if entry_signal:
+                        if entry_signal["type"] == "BREAKOUT":
+                            results["breakout_signals"].append(entry_signal)
+                        else:
+                            results["event_signals"].append(entry_signal)
+                        
+                        order = self._execute_buy(symbol, name, indicators, entry_signal)
+                        if order:
+                            results["orders_placed"].append(order)
+                
+                results["stocks_analyzed"] += 1
+                
+            except Exception as e:
+                logger.error(f"   ❌ 분석 오류: {e}")
+                results["errors"].append({"symbol": symbol, "error": str(e)})
+        
+        self._print_analysis_summary(results)
+        return results
+    
+    def _calculate_momentum_indicators(self, df) -> Optional[Dict[str, Any]]:
+        """
+        모멘텀 관련 지표 계산
+        Calculate momentum-related indicators
+        """
+        try:
+            import pandas as pd
+            import numpy as np
+            
+            close = df['close'].astype(float)
+            high = df['high'].astype(float)
+            low = df['low'].astype(float)
+            volume = df['volume'].astype(float)
+            
+            # N일 최고가 / 최저가
+            high_n = high.rolling(window=self.breakout_period).max()
+            low_n = low.rolling(window=self.breakdown_period).min()
+            
+            # 이동평균선
+            ma10 = close.rolling(window=10).mean()
+            ma20 = close.rolling(window=20).mean()
+            
+            # 거래량 이동평균
+            volume_ma = volume.rolling(window=20).mean()
+            
+            # ADX 계산
+            adx = self._calculate_adx(high, low, close, self.adx_period)
+            
+            # ATR 계산
+            atr = self._calculate_atr(high, low, close, self.atr_period)
+            
+            # RSI 계산
+            rsi = self._calculate_rsi_simple(close, 14)
+            
+            # 최신 값
+            latest = {
+                "close": int(close.iloc[-1]),
+                "high": int(high.iloc[-1]),
+                "low": int(low.iloc[-1]),
+                "volume": int(volume.iloc[-1]),
+                "high_n": int(high_n.iloc[-1]) if not pd.isna(high_n.iloc[-1]) else 0,
+                "low_n": int(low_n.iloc[-1]) if not pd.isna(low_n.iloc[-1]) else 0,
+                "prev_high_n": int(high_n.iloc[-2]) if len(high_n) > 1 and not pd.isna(high_n.iloc[-2]) else 0,
+                "ma10": round(ma10.iloc[-1], 2) if not pd.isna(ma10.iloc[-1]) else 0,
+                "ma20": round(ma20.iloc[-1], 2) if not pd.isna(ma20.iloc[-1]) else 0,
+                "volume_ma": round(volume_ma.iloc[-1], 2) if not pd.isna(volume_ma.iloc[-1]) else 1,
+                "volume_ratio": round(volume.iloc[-1] / volume_ma.iloc[-1], 2) if volume_ma.iloc[-1] > 0 else 0,
+                "adx": round(adx.iloc[-1], 2) if not pd.isna(adx.iloc[-1]) else 0,
+                "atr": round(atr.iloc[-1], 2) if not pd.isna(atr.iloc[-1]) else 0,
+                "rsi": round(rsi.iloc[-1], 2) if not pd.isna(rsi.iloc[-1]) else 50,
+            }
+            
+            # 브레이크아웃 여부
+            latest["is_breakout"] = latest["close"] > latest["prev_high_n"] and latest["prev_high_n"] > 0
+            latest["is_breakdown"] = latest["close"] < latest["low_n"] and latest["low_n"] > 0
+            
+            return latest
+            
+        except Exception as e:
+            logger.error(f"지표 계산 오류: {e}")
+            return None
+    
+    def _calculate_adx(self, high, low, close, period: int = 14):
+        """ADX (Average Directional Index) 계산"""
+        import pandas as pd
+        import numpy as np
+        
+        # TR (True Range)
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # +DM, -DM
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+        
+        # Smoothed
+        tr_smooth = tr.ewm(span=period, adjust=False).mean()
+        plus_dm_smooth = plus_dm.ewm(span=period, adjust=False).mean()
+        minus_dm_smooth = minus_dm.ewm(span=period, adjust=False).mean()
+        
+        # +DI, -DI
+        plus_di = 100 * plus_dm_smooth / tr_smooth
+        minus_di = 100 * minus_dm_smooth / tr_smooth
+        
+        # DX, ADX
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.ewm(span=period, adjust=False).mean()
+        
+        return adx
+    
+    def _calculate_atr(self, high, low, close, period: int = 14):
+        """ATR (Average True Range) 계산"""
+        import pandas as pd
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        atr = tr.ewm(span=period, adjust=False).mean()
+        return atr
+    
+    def _calculate_rsi_simple(self, prices, period: int = 14):
+        """간단한 RSI 계산"""
+        delta = prices.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+        
+        avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
+        avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
+        
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    def _analyze_event(self, symbol: str, name: str, indicators: Dict) -> Optional[str]:
+        """
+        이벤트(뉴스/공시) 분석
+        Analyze news/disclosure events
+        
+        Returns:
+            str: "POSITIVE", "NEGATIVE", or None
+        """
+        # 거래량 급등 체크 (뉴스 발생 신호)
+        volume_ratio = indicators.get("volume_ratio", 1.0)
+        
+        if volume_ratio >= self.news_volume_spike:
+            # 거래량 급등 시 뉴스 체크 필요
+            logger.info(f"   📰 거래량 급등 감지 ({volume_ratio:.1f}x) - 뉴스 영향 가능성")
+            
+            # TODO: 실제 뉴스 API 연동 시 여기서 뉴스 조회
+            # 현재는 거래량 + 가격 방향으로 추정
+            
+            price_change = indicators["close"] - indicators.get("ma10", indicators["close"])
+            
+            if price_change > 0 and volume_ratio >= self.news_volume_spike:
+                logger.info(f"   ✅ 긍정적 이벤트 추정 (상승 + 거래량 급등)")
+                return "POSITIVE"
+            elif price_change < 0 and volume_ratio >= self.news_volume_spike:
+                logger.info(f"   ⚠️ 부정적 이벤트 추정 (하락 + 거래량 급등)")
+                return "NEGATIVE"
+        
+        return None
+    
+    def _check_entry_conditions(self, symbol: str, indicators: Dict, event_sentiment: Optional[str]) -> Optional[Dict]:
+        """
+        진입 조건 체크
+        Check entry conditions
+        """
+        close = indicators["close"]
+        adx = indicators["adx"]
+        volume_ratio = indicators["volume_ratio"]
+        is_breakout = indicators["is_breakout"]
+        rsi = indicators["rsi"]
+        
+        # 최대 포지션 체크
+        if len(self._positions) >= self.max_positions:
+            logger.info(f"   ⚠️ 최대 포지션 도달 ({self.max_positions}개)")
+            return None
+        
+        # 과매수 체크 (RSI > 80이면 진입 회피)
+        if rsi > 80:
+            logger.info(f"   ⚠️ RSI 과매수 ({rsi:.1f}) - 진입 회피")
+            return None
+        
+        # 조건 1: 모멘텀 브레이크아웃
+        if is_breakout and adx >= self.adx_threshold and volume_ratio >= self.volume_multiplier:
+            logger.info(f"   🔔 브레이크아웃 신호!")
+            logger.info(f"      {self.breakout_period}일 고가 돌파 + ADX {adx:.1f} + 거래량 {volume_ratio:.1f}x")
+            self.signals_generated += 1
+            return {
+                "type": "BREAKOUT",
+                "symbol": symbol,
+                "price": close,
+                "adx": adx,
+                "volume_ratio": volume_ratio,
+                "rsi": rsi
+            }
+        
+        # 조건 2: 이벤트 드리븐 (긍정적 이벤트 + 거래량)
+        if event_sentiment == "POSITIVE" and volume_ratio >= self.news_volume_spike:
+            # 추가 조건: 10일선 위에 있어야 함
+            if close > indicators.get("ma10", 0):
+                logger.info(f"   🔔 이벤트 드리븐 신호!")
+                logger.info(f"      긍정적 이벤트 + 거래량 {volume_ratio:.1f}x + 10일선 상단")
+                self.signals_generated += 1
+                return {
+                    "type": "EVENT",
+                    "symbol": symbol,
+                    "price": close,
+                    "volume_ratio": volume_ratio,
+                    "event": "POSITIVE"
+                }
+        
+        return None
+    
+    def _check_exit_conditions(self, symbol: str, indicators: Dict, event_sentiment: Optional[str]) -> Optional[Dict]:
+        """
+        청산 조건 체크
+        Check exit conditions
+        """
+        pos = self._positions.get(symbol)
+        if not pos:
+            return None
+        
+        close = indicators["close"]
+        entry_price = pos["entry_price"]
+        stop_price = pos.get("stop_price", 0)
+        
+        # 조건 1: 트레일링 스탑
+        if self.use_trailing_stop and close <= stop_price:
+            pnl_pct = ((close - entry_price) / entry_price) * 100
+            logger.info(f"   🛑 트레일링 스탑 발동! ({pnl_pct:+.2f}%)")
+            self.trailing_stop_exits += 1
+            return {
+                "reason": "TRAILING_STOP",
+                "symbol": symbol,
+                "entry_price": entry_price,
+                "exit_price": close,
+                "pnl_pct": round(pnl_pct, 2)
+            }
+        
+        # 조건 2: 부정적 이벤트 → 즉시 청산
+        if event_sentiment == "NEGATIVE":
+            pnl_pct = ((close - entry_price) / entry_price) * 100
+            logger.info(f"   ⚠️ 부정적 이벤트 청산! ({pnl_pct:+.2f}%)")
+            self.event_exits += 1
+            return {
+                "reason": "EVENT_EXIT",
+                "symbol": symbol,
+                "entry_price": entry_price,
+                "exit_price": close,
+                "pnl_pct": round(pnl_pct, 2)
+            }
+        
+        # 조건 3: 10일선 하향 이탈
+        if close < indicators.get("ma10", close):
+            # 2일 연속 10일선 아래면 청산
+            if pos.get("below_ma10_count", 0) >= 1:
+                pnl_pct = ((close - entry_price) / entry_price) * 100
+                logger.info(f"   📉 10일선 이탈 청산! ({pnl_pct:+.2f}%)")
+                return {
+                    "reason": "MA_BREAKDOWN",
+                    "symbol": symbol,
+                    "entry_price": entry_price,
+                    "exit_price": close,
+                    "pnl_pct": round(pnl_pct, 2)
+                }
+            else:
+                pos["below_ma10_count"] = pos.get("below_ma10_count", 0) + 1
+        else:
+            pos["below_ma10_count"] = 0
+        
+        return None
+    
+    def _execute_buy(self, symbol: str, name: str, indicators: Dict, signal: Dict) -> Optional[Dict]:
+        """매수 주문 실행"""
+        # 이미 보유 중인지 확인
+        current_position = self.client.get_position(symbol)
+        if current_position > 0:
+            logger.info(f"   ℹ️ 이미 보유 중 ({current_position}주)")
+            return None
+        
+        entry_price = indicators["close"]
+        atr = indicators.get("atr", entry_price * 0.02)
+        
+        # 초기 스탑 가격 계산 (ATR 기반)
+        initial_stop = int(entry_price - (atr * self.atr_multiplier))
+        
+        logger.info(f"   💰 매수 주문: {name} {self.order_quantity}주 @ {entry_price:,}원")
+        
+        order = self.client.buy_market_order(symbol, self.order_quantity)
+        
+        if order:
+            self.orders_placed += 1
+            if signal["type"] == "BREAKOUT":
+                self.breakout_entries += 1
+            else:
+                self.event_entries += 1
+            
+            # 포지션 추적
+            self._positions[symbol] = {
+                "entry_price": entry_price,
+                "quantity": self.order_quantity,
+                "entry_time": datetime.now(),
+                "name": name,
+                "high_since_entry": entry_price,
+                "stop_price": initial_stop,
+                "signal_type": signal["type"],
+                "below_ma10_count": 0
+            }
+            
+            logger.info(f"      📍 진입가: {entry_price:,}원")
+            logger.info(f"      🛑 초기 스탑: {initial_stop:,}원 (ATR x {self.atr_multiplier})")
+            
+            return {
+                "action": "BUY",
+                "symbol": symbol,
+                "name": name,
+                "quantity": self.order_quantity,
+                "price": entry_price,
+                "stop_price": initial_stop,
+                "signal_type": signal["type"]
+            }
+        
+        return None
+    
+    def _execute_sell(self, symbol: str, name: str, indicators: Dict, reason: str) -> Optional[Dict]:
+        """매도 주문 실행"""
+        current_position = self.client.get_position(symbol)
+        if current_position <= 0:
+            logger.info(f"   ℹ️ 보유 수량 없음")
+            return None
+        
+        pos = self._positions.get(symbol, {})
+        entry_price = pos.get("entry_price", indicators["close"])
+        exit_price = indicators["close"]
+        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+        
+        pnl_emoji = "📈" if pnl_pct > 0 else "📉" if pnl_pct < 0 else "➖"
+        
+        logger.info(f"   💸 매도 주문 ({reason}): {name} {current_position}주")
+        logger.info(f"      {pnl_emoji} {entry_price:,}원 → {exit_price:,}원 ({pnl_pct:+.2f}%)")
+        
+        order = self.client.sell_market_order(symbol, current_position)
+        
+        if order:
+            self.orders_placed += 1
+            
+            # 포지션 정리
+            if symbol in self._positions:
+                del self._positions[symbol]
+            
+            return {
+                "action": "SELL",
+                "symbol": symbol,
+                "name": name,
+                "quantity": current_position,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "pnl_pct": round(pnl_pct, 2),
+                "reason": reason
+            }
+        
+        return None
+    
+    def _print_momentum_status(self, symbol: str, name: str, indicators: Dict):
+        """모멘텀 상태 출력"""
+        trend = "📈 상승추세" if indicators["adx"] > self.adx_threshold else "📉 약추세"
+        breakout = "⬆️ 돌파" if indicators["is_breakout"] else ""
+        breakdown = "⬇️ 이탈" if indicators["is_breakdown"] else ""
+        
+        logger.info(f"   현재가: {indicators['close']:,}원")
+        logger.info(f"   {self.breakout_period}일 고가: {indicators['high_n']:,}원 {breakout}")
+        logger.info(f"   ADX({self.adx_period}): {indicators['adx']:.1f} | {trend}")
+        logger.info(f"   RSI(14): {indicators['rsi']:.1f}")
+        logger.info(f"   거래량: {indicators['volume_ratio']:.1f}x 평균")
+    
+    def _print_analysis_summary(self, results: Dict):
+        """분석 결과 요약"""
+        logger.info("\n" + "=" * 60)
+        logger.info("📊 모멘텀 + 이벤트 분석 결과")
+        logger.info("=" * 60)
+        logger.info(f"   분석 종목: {results['stocks_analyzed']}개")
+        logger.info(f"   브레이크아웃 신호: {len(results['breakout_signals'])}개")
+        logger.info(f"   이벤트 신호: {len(results['event_signals'])}개")
+        logger.info(f"   청산 신호: {len(results['exit_signals'])}개")
+        logger.info(f"   실행 주문: {len(results['orders_placed'])}개")
+        
+        if self._positions:
+            logger.info(f"\n   📦 현재 보유 포지션: {len(self._positions)}개")
+            for sym, pos in self._positions.items():
+                logger.info(f"      - {pos['name']}: {pos['quantity']}주 @ {pos['entry_price']:,}원")
+                logger.info(f"        스탑: {pos['stop_price']:,}원 | 진입: {pos['signal_type']}")
+        
+        logger.info("=" * 60)
+    
+    def on_stop(self):
+        """전략 종료"""
+        logger.info("=" * 60)
+        logger.info("📊 모멘텀 + 이벤트 전략 종료 요약")
+        logger.info(f"   총 신호: {self.signals_generated}개")
+        logger.info(f"   총 주문: {self.orders_placed}개")
+        logger.info(f"   브레이크아웃 진입: {self.breakout_entries}회")
+        logger.info(f"   이벤트 진입: {self.event_entries}회")
+        logger.info(f"   트레일링 스탑 청산: {self.trailing_stop_exits}회")
+        logger.info(f"   이벤트 청산: {self.event_exits}회")
+        if self._positions:
+            logger.info(f"   미청산 포지션: {len(self._positions)}개")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
