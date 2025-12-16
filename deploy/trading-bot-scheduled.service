@@ -1,0 +1,23 @@
+[Unit]
+Description=KIS Trading Bot - Dual Momentum Strategy (Market Hours Only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/python_program_trade
+Environment="PATH=/home/ubuntu/python_program_trade/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/ubuntu/python_program_trade/venv/bin/python main.py --dmv
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/ubuntu/python_program_trade/logs/bot.log
+StandardError=append:/home/ubuntu/python_program_trade/logs/bot_error.log
+
+# 리소스 제한 (t3.micro 최적화)
+MemoryMax=800M
+CPUQuota=90%
+
+[Install]
+WantedBy=multi-user.target

@@ -1000,6 +1000,11 @@ if __name__ == "__main__":
         help="듀얼 모멘텀 + 변동성 돌파 전략 (Dual Momentum + Volatility Breakout)"
     )
     parser.add_argument(
+        "--hybrid",
+        action="store_true",
+        help="하이브리드 실시간+폴링 전략 (Hybrid WebSocket + REST Strategy)"
+    )
+    parser.add_argument(
         "--all",
         action="store_true",
         dest="run_all",
@@ -1008,9 +1013,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--stocks",
         type=str,
-        choices=["cosmetics", "ai", "tech", "all"],
+        choices=["cosmetics", "ai", "tech", "kospi200", "all"],
         default="tech",
-        help="종목 그룹: tech(대형기술주), cosmetics(화장품), ai(AI), all(전체)"
+        help="종목 그룹: tech(대형기술주), cosmetics(화장품), ai(AI), kospi200(코스피200), all(전체)"
     )
     
     args = parser.parse_args()
@@ -1029,6 +1034,9 @@ if __name__ == "__main__":
         run_momentum_event(stock_group=args.stocks)
     elif args.dmv:
         run_dual_momentum()
+    elif args.hybrid:
+        from strategy_hybrid import run_hybrid_strategy
+        run_hybrid_strategy(stock_group=args.stocks)
     elif args.run_all:
         run_all_strategies()
     else:

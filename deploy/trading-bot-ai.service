@@ -1,0 +1,23 @@
+[Unit]
+Description=KIS Trading Bot - AI Strategy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/python_program_trade
+Environment="PATH=/home/ubuntu/python_program_trade/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/ubuntu/python_program_trade/venv/bin/python3 main.py --momentum --stocks ai
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/python_program_trade/logs/bot_ai.log
+StandardError=append:/home/ubuntu/python_program_trade/logs/bot_ai_error.log
+
+# 리소스 제한
+MemoryMax=200M
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target

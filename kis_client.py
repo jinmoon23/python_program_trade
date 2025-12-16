@@ -484,7 +484,7 @@ class KISClient:
     # 분봉 데이터 조회 메서드 (Minute Chart Methods)
     # ========================================
     
-    def get_minute_chart_df(self, symbol: str, period: int = 1):
+    def get_minute_chart_df(self, symbol: str, period: int = 1, max_retries: int = 3):
         """
         분봉 데이터를 pandas DataFrame으로 반환합니다.
         Get minute chart data as pandas DataFrame.
@@ -492,37 +492,46 @@ class KISClient:
         Args:
             symbol: 종목 코드 (Stock code)
             period: 분봉 주기 (1, 3, 5, 10, 15, 30, 60분)
+            max_retries: 최대 재시도 횟수
         
         Returns:
             pd.DataFrame: 분봉 DataFrame (date 인덱스) 또는 None
         """
+        import time as time_module
+        
         if not self._check_connection():
             return None
         
-        try:
-            import pandas as pd
-            
-            # python-kis 2.x의 분봉 조회
-            stock = self.kis.stock(symbol)
-            
-            # chart 메서드로 분봉 조회 (period=1 for 1분봉)
-            chart = stock.chart(period=period)
-            df = chart.df()
-            
-            # time 컬럼을 인덱스로 설정
-            if 'time' in df.columns:
-                df['date'] = pd.to_datetime(df['time'])
-                df.set_index('date', inplace=True)
-                df.drop('time', axis=1, inplace=True, errors='ignore')
-            
-            df.sort_index(inplace=True)  # 시간 오름차순 정렬
-            
-            logger.debug(f"분봉 DataFrame 조회 성공 - {symbol}: {len(df)}행 ({period}분봉)")
-            return df
-            
-        except Exception as e:
-            logger.error(f"분봉 DataFrame 조회 실패 ({symbol}): {e}")
-            return None
+        for attempt in range(max_retries):
+            try:
+                import pandas as pd
+                
+                # python-kis 2.x의 분봉 조회
+                stock = self.kis.stock(symbol)
+                
+                # chart 메서드로 분봉 조회 (period=1 for 1분봉)
+                chart = stock.chart(period=period)
+                df = chart.df()
+                
+                # time 컬럼을 인덱스로 설정
+                if 'time' in df.columns:
+                    df['date'] = pd.to_datetime(df['time'])
+                    df.set_index('date', inplace=True)
+                    df.drop('time', axis=1, inplace=True, errors='ignore')
+                
+                df.sort_index(inplace=True)  # 시간 오름차순 정렬
+                
+                logger.debug(f"분봉 DataFrame 조회 성공 - {symbol}: {len(df)}행 ({period}분봉)")
+                return df
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2  # 2초, 4초, 6초...
+                    logger.warning(f"분봉 조회 재시도 ({symbol}): {attempt + 1}/{max_retries}, {wait_time}초 대기")
+                    time_module.sleep(wait_time)
+                else:
+                    logger.error(f"분봉 DataFrame 조회 실패 ({symbol}): {e}")
+                    return None
     
     # ========================================
     # 내부 헬퍼 메서드 (Internal Helper Methods)

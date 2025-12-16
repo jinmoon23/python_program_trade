@@ -133,7 +133,7 @@ class MACrossoverConfig:
     # 타임프레임 설정 (Timeframe Settings)
     # ========================================
     use_minute_chart: bool = os.getenv("USE_MINUTE_CHART", "true").lower() == "true"  # 분봉 사용 여부
-    chart_period: int = int(os.getenv("CHART_PERIOD", "1"))          # 분봉 주기 (1, 3, 5, 10, 15, 30, 60)
+    chart_period: int = int(os.getenv("CHART_PERIOD", "10"))         # 분봉 주기 (1, 3, 5, 10, 15, 30, 60) - 10분봉 기본
     
     # 이동평균선 설정 (Moving Average Settings)
     # 분봉 사용 시: 20분/60분, 일봉 사용 시: 20일/60일
@@ -155,14 +155,14 @@ class MACrossoverConfig:
     # 배치 처리 설정 (Batch Processing Settings)
     # Rate Limit 방지를 위한 배치 처리
     # ========================================
-    batch_size: int = int(os.getenv("BATCH_SIZE", "3"))              # 한 배치당 종목 수
-    batch_delay: float = float(os.getenv("BATCH_DELAY", "2.0"))      # 배치 간 대기 시간 (초)
-    api_delay: float = float(os.getenv("API_DELAY", "0.5"))          # API 호출 간 대기 시간 (초)
+    batch_size: int = int(os.getenv("BATCH_SIZE", "5"))              # 한 배치당 종목 수 (10분봉용)
+    batch_delay: float = float(os.getenv("BATCH_DELAY", "3.0"))      # 배치 간 대기 시간 (초)
+    api_delay: float = float(os.getenv("API_DELAY", "1.0"))          # API 호출 간 대기 시간 (초)
     
     # ========================================
     # 분봉 전략 실행 설정 (Minute Strategy Settings)
     # ========================================
-    analysis_interval: int = int(os.getenv("ANALYSIS_INTERVAL", "60"))  # 분석 주기 (초)
+    analysis_interval: int = int(os.getenv("ANALYSIS_INTERVAL", "600"))  # 분석 주기 (초) - 10분
     market_open: str = os.getenv("MARKET_OPEN", "09:00")             # 장 시작 시간
     market_close: str = os.getenv("MARKET_CLOSE", "15:30")           # 장 마감 시간
     
@@ -201,6 +201,7 @@ class MACrossoverConfig:
     COSMETICS_STOCKS: dict = None
     AI_STOCKS: dict = None
     TECH_GIANTS: dict = None  # 대형 기술주
+    KOSPI200_STOCKS: dict = None  # KOSPI 200 주요 종목
     
     def __post_init__(self):
         # ========================================
@@ -254,6 +255,116 @@ class MACrossoverConfig:
                 "373220": "LG에너지솔루션",   # LG Energy Solution
                 "051910": "LG화학",            # LG Chem
             }
+        
+        # ========================================
+        # KOSPI 200 주요 종목 (KOSPI 200 Major Stocks)
+        # 시가총액 상위 100개 대표 종목 (10분봉 사용으로 확장)
+        # ========================================
+        if self.KOSPI200_STOCKS is None:
+            self.KOSPI200_STOCKS = {
+                # 대형주 Top 50
+                "005930": "삼성전자",
+                "000660": "SK하이닉스",
+                "005380": "현대차",
+                "000270": "기아",
+                "005490": "POSCO홀딩스",
+                "035420": "NAVER",
+                "035720": "카카오",
+                "006400": "삼성SDI",
+                "051910": "LG화학",
+                "373220": "LG에너지솔루션",
+                "003670": "포스코퓨처엠",
+                "028260": "삼성물산",
+                "105560": "KB금융",
+                "055550": "신한지주",
+                "086790": "하나금융지주",
+                "096770": "SK이노베이션",
+                "034730": "SK",
+                "012330": "현대모비스",
+                "066570": "LG전자",
+                "003550": "LG",
+                "032830": "삼성생명",
+                "017670": "SK텔레콤",
+                "030200": "KT",
+                "000810": "삼성화재",
+                "018260": "삼성에스디에스",
+                "033780": "KT&G",
+                "010130": "고려아연",
+                "009150": "삼성전기",
+                "011200": "HMM",
+                "034020": "두산에너빌리티",
+                "010950": "S-Oil",
+                "036570": "엔씨소프트",
+                "009540": "한국조선해양",
+                "011070": "LG이노텍",
+                "003490": "대한항공",
+                "024110": "기업은행",
+                "316140": "우리금융지주",
+                "000720": "현대건설",
+                "047050": "포스코인터내셔널",
+                "015760": "한국전력",
+                "090430": "아모레퍼시픽",
+                "004020": "현대제철",
+                "010140": "삼성중공업",
+                "011790": "SKC",
+                "267250": "HD현대",
+                "009830": "한화솔루션",
+                "042660": "한화오션",
+                "352820": "하이브",
+                "259960": "크래프톤",
+                "251270": "넷마블",
+                "068270": "셀트리온",
+                # 중형주 51-100
+                "326030": "SK바이오팜",
+                "207940": "삼성바이오로직스",
+                "000100": "유한양행",
+                "128940": "한미약품",
+                "006800": "미래에셋증권",
+                "005940": "NH투자증권",
+                "016360": "삼성증권",
+                "139480": "이마트",
+                "004170": "신세계",
+                "023530": "롯데쇼핑",
+                "069960": "현대백화점",
+                "004990": "롯데지주",
+                "271560": "오리온",
+                "097950": "CJ제일제당",
+                "051600": "한전KPS",
+                "034220": "LG디스플레이",
+                "000150": "두산",
+                "009420": "한올바이오파마",
+                "180640": "한진칼",
+                "002790": "아모레G",
+                "051900": "LG생활건강",
+                "004800": "효성",
+                "006260": "LS",
+                "001040": "CJ",
+                "000880": "한화",
+                "011170": "롯데케미칼",
+                "010620": "현대미포조선",
+                "241560": "두산밥캣",
+                "161390": "한국타이어앤테크놀로지",
+                "028050": "삼성엔지니어링",
+                "009240": "한샘",
+                "005850": "에스엘",
+                "000120": "CJ대한통운",
+                "071050": "한국금융지주",
+                "029780": "삼성카드",
+                "003410": "쌍용C&E",
+                "001450": "현대해상",
+                "000240": "한국앤컴퍼니",
+                "002380": "KCC",
+                "000070": "삼양홀딩스",
+                "005830": "DB손해보험",
+                "138930": "BNK금융지주",
+                "175330": "JB금융지주",
+                "024720": "한국콜마홀딩스",
+                "192820": "코스맥스",
+                "161890": "한국콜마",
+                "039490": "키움증권",
+                "001120": "LX인터내셔널",
+                "003620": "쌍용양회",
+            }
     
     def get_stocks(self, group: str = "cosmetics") -> dict:
         """
@@ -272,12 +383,15 @@ class MACrossoverConfig:
             return self.AI_STOCKS
         elif group == "tech":
             return self.TECH_GIANTS
+        elif group == "kospi200":
+            return self.KOSPI200_STOCKS
         elif group == "all":
             # 모든 종목 합치기
             all_stocks = {}
             all_stocks.update(self.COSMETICS_STOCKS)
             all_stocks.update(self.AI_STOCKS)
             all_stocks.update(self.TECH_GIANTS)
+            all_stocks.update(self.KOSPI200_STOCKS)
             return all_stocks
         else:
             # 커스텀 그룹 (환경변수에서 로드 가능)

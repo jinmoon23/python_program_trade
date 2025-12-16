@@ -62,3 +62,16 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# AWS 배포 관련 (민감 정보)
+# AWS deployment (sensitive)
+*.pem
+*.ppk
+deploy/*.pem
+deploy/*.ppk
+
+# 백업 파일
+# Backup files
+*.tar.gz
+*.zip
+backup/
