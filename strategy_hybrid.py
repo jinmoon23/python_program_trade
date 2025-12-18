@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pykis import KisRealtimePrice, KisSubscriptionEventArgs, KisWebsocketClient
 
 from kis_client import KISClient
-from config import ma_config
+from config import ma_config, fee_config
 
 logger = logging.getLogger(__name__)
 
@@ -78,17 +78,33 @@ class HybridStrategy:
         self.long_ma = ma_config.long_ma_period
         self.order_quantity = ma_config.order_quantity
         
+        # 수수료 설정
+        self.fee_config = fee_config
+        self.min_profit_threshold = fee_config.min_profit_threshold
+        self.break_even_rate = fee_config.calculate_break_even_rate()
+        
         # 포지션 추적
         self.positions: Dict[str, dict] = {}
         self.orders_placed = 0
+        self.fee_saved_count = 0  # 수수료로 인해 매도 스킵한 횟수
         
         # 상태
         self.is_running = False
         self._polling_thread: Optional[threading.Thread] = None
+        self._monitor_thread: Optional[threading.Thread] = None
+        
+        # WebSocket 연결 모니터링
+        self._last_realtime_update: datetime = datetime.now()
+        self._websocket_timeout_sec: int = 120  # 2분간 데이터 없으면 재연결
+        self._reconnect_count: int = 0
+        self._max_reconnect_attempts: int = 10  # 최대 재연결 시도 횟수
+        self._reconnect_backoff_sec: float = 2.0  # 재연결 대기 시간 (지수 증가)
         
         logger.info(f"하이브리드 전략 초기화")
         logger.info(f"  실시간 종목: {len(self.realtime_stocks)}개")
         logger.info(f"  폴링 종목: {len(self.polling_stocks)}개")
+        logger.info(f"  왕복 수수료: {self.break_even_rate:.3f}%")
+        logger.info(f"  최소 수익 기준: {self.min_profit_threshold}%")
     
     def start(self):
         """전략 시작"""
@@ -105,6 +121,9 @@ class HybridStrategy:
         # 2. 폴링 스레드 시작
         self._start_polling_thread()
         
+        # 3. WebSocket 모니터링 스레드 시작
+        self._start_monitor_thread()
+        
         logger.info("✅ 전략 시작 완료")
     
     def stop(self):
@@ -113,20 +132,20 @@ class HybridStrategy:
         self.is_running = False
         
         # WebSocket 구독 해제
-        for ticket in self._subscriptions:
-            try:
-                ticket.unsubscribe()
-            except:
-                pass
+        self._unsubscribe_all()
         
         # 폴링 스레드 종료 대기
         if self._polling_thread and self._polling_thread.is_alive():
             self._polling_thread.join(timeout=5)
         
+        # 모니터링 스레드 종료 대기
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=5)
+        
         logger.info("✅ 전략 중지 완료")
     
     def _init_realtime_stocks(self):
-        """실시간 종목 초기화"""
+        """실시간 종목 초기화 (과거 데이터로 MA 미리 계산)"""
         logger.info(f"\n📊 실시간 종목 초기화 ({len(self.realtime_stocks)}개)...")
         
         for symbol, name in self.realtime_stocks.items():
@@ -134,21 +153,37 @@ class HybridStrategy:
             price_info = self.client.get_current_price(symbol)
             
             if price_info:
-                self.realtime_data[symbol] = RealtimeStock(
+                stock = RealtimeStock(
                     symbol=symbol,
                     name=name,
-                    price=price_info.get('price', 0),
-                    prev_close=price_info.get('prev_close', 0),
-                    high=price_info.get('high', 0),
-                    low=price_info.get('low', 0),
-                    volume=price_info.get('volume', 0)
+                    price=int(price_info.get('price', 0)),
+                    prev_close=int(price_info.get('prev_close', 0)),
+                    high=int(price_info.get('high', 0)),
+                    low=int(price_info.get('low', 0)),
+                    volume=int(price_info.get('volume', 0))
                 )
-                logger.debug(f"  ✅ {name}: {price_info.get('price', 0):,}원")
+                
+                # 과거 분봉 데이터로 MA 미리 계산
+                try:
+                    df = self.client.get_minute_chart_df(symbol, period=ma_config.chart_period)
+                    if df is not None and len(df) >= self.long_ma:
+                        # 최근 long_ma개 종가를 히스토리에 추가
+                        prices = df['close'].tail(self.long_ma).tolist()
+                        stock.price_history = [int(p) for p in prices]
+                        stock.ma_short = sum(stock.price_history[-self.short_ma:]) / self.short_ma
+                        stock.ma_long = sum(stock.price_history) / self.long_ma
+                        logger.debug(f"  ✅ {name}: {stock.price:,}원 (MA{self.short_ma}:{stock.ma_short:,.0f}, MA{self.long_ma}:{stock.ma_long:,.0f})")
+                    else:
+                        logger.debug(f"  ⚠️ {name}: MA 계산 불가 (데이터 부족)")
+                except Exception as e:
+                    logger.debug(f"  ⚠️ {name}: 분봉 조회 실패 - {e}")
+                
+                self.realtime_data[symbol] = stock
             else:
                 self.realtime_data[symbol] = RealtimeStock(symbol=symbol, name=name)
                 logger.warning(f"  ⚠️ {name}: 초기화 실패")
             
-            time.sleep(0.3)  # API 호출 간격
+            time.sleep(0.5)  # API 호출 간격 (분봉 조회 추가로 늘림)
     
     def _subscribe_realtime(self):
         """WebSocket 실시간 구독"""
@@ -169,6 +204,100 @@ class HybridStrategy:
         
         logger.info(f"✅ {len(self._subscriptions)}개 종목 실시간 구독 완료")
     
+    def _unsubscribe_all(self):
+        """모든 WebSocket 구독 해제"""
+        for ticket in self._subscriptions:
+            try:
+                ticket.unsubscribe()
+            except:
+                pass
+        self._subscriptions = []
+    
+    def _reconnect_websocket(self) -> bool:
+        """
+        WebSocket 재연결 (지수 백오프 적용)
+        Returns: True if reconnection successful, False otherwise
+        """
+        self._reconnect_count += 1
+        
+        # 최대 재연결 시도 횟수 초과 시
+        if self._reconnect_count > self._max_reconnect_attempts:
+            logger.error(f"❌ WebSocket 재연결 실패 (최대 시도 횟수 {self._max_reconnect_attempts}회 초과)")
+            logger.info("🔄 재연결 카운터 리셋 후 재시도...")
+            self._reconnect_count = 1
+        
+        # 지수 백오프 대기 시간 계산 (최대 60초)
+        wait_time = min(self._reconnect_backoff_sec * (2 ** (self._reconnect_count - 1)), 60)
+        logger.warning(f"🔄 WebSocket 재연결 시도 #{self._reconnect_count} ({wait_time:.1f}초 후)...")
+        
+        # 기존 구독 해제
+        self._unsubscribe_all()
+        
+        # 지수 백오프 대기
+        time.sleep(wait_time)
+        
+        try:
+            # 재구독
+            self._subscribe_realtime()
+            
+            # 마지막 업데이트 시간 리셋
+            self._last_realtime_update = datetime.now()
+            
+            # 성공 시 백오프 리셋
+            if self._reconnect_count > 3:
+                self._reconnect_count = 0  # 성공 시 카운터 리셋
+            
+            logger.info(f"✅ WebSocket 재연결 완료 (총 {self._reconnect_count}회 시도)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ WebSocket 재연결 실패: {e}")
+            return False
+    
+    def _monitor_websocket(self):
+        """WebSocket 연결 상태 모니터링 스레드"""
+        logger.info("🔍 WebSocket 모니터링 시작")
+        logger.info(f"   타임아웃: {self._websocket_timeout_sec}초, 최대 재연결: {self._max_reconnect_attempts}회")
+        
+        consecutive_failures = 0
+        
+        while self.is_running:
+            try:
+                # 30초마다 체크
+                time.sleep(30)
+                
+                if not self.is_running:
+                    break
+                
+                # 마지막 데이터 수신 후 경과 시간
+                elapsed = (datetime.now() - self._last_realtime_update).total_seconds()
+                
+                if elapsed > self._websocket_timeout_sec:
+                    logger.warning(f"⚠️ WebSocket 데이터 수신 없음 ({elapsed:.0f}초 경과)")
+                    
+                    success = self._reconnect_websocket()
+                    
+                    if success:
+                        consecutive_failures = 0
+                    else:
+                        consecutive_failures += 1
+                        
+                        # 연속 5회 실패 시 전체 재초기화
+                        if consecutive_failures >= 5:
+                            logger.warning("🔄 연속 재연결 실패, 전체 재초기화 시도...")
+                            self._init_realtime_stocks()
+                            self._subscribe_realtime()
+                            consecutive_failures = 0
+                else:
+                    # 정상 동작 중이면 실패 카운터 리셋
+                    consecutive_failures = 0
+                    
+            except Exception as e:
+                logger.error(f"WebSocket 모니터링 오류: {e}")
+                consecutive_failures += 1
+        
+        logger.info("🔍 WebSocket 모니터링 종료")
+    
     def _on_price_update(self, sender: KisWebsocketClient, e: KisSubscriptionEventArgs[KisRealtimePrice]):
         """실시간 체결가 수신 콜백"""
         try:
@@ -181,14 +310,17 @@ class HybridStrategy:
             stock = self.realtime_data[symbol]
             old_price = stock.price
             
-            # 데이터 업데이트
-            stock.price = price_data.price
-            stock.change = price_data.change
-            stock.volume = price_data.volume
+            # 데이터 업데이트 (Decimal -> int 변환)
+            stock.price = int(price_data.price)
+            stock.change = int(price_data.change)
+            stock.volume = int(price_data.volume)
             stock.last_update = datetime.now()
             
+            # WebSocket 연결 상태 업데이트
+            self._last_realtime_update = datetime.now()
+            
             # 가격 히스토리 업데이트 (MA 계산용)
-            stock.price_history.append(price_data.price)
+            stock.price_history.append(int(price_data.price))
             if len(stock.price_history) > self.long_ma:
                 stock.price_history = stock.price_history[-self.long_ma:]
             
@@ -200,6 +332,9 @@ class HybridStrategy:
             
             # 신호 체크
             self._check_realtime_signal(symbol, old_price)
+            
+            # 익절/손절 체크 (보유 중인 종목)
+            self._check_take_profit_stop_loss(symbol, int(price_data.price))
             
         except Exception as e:
             logger.error(f"실시간 데이터 처리 오류: {e}")
@@ -220,22 +355,54 @@ class HybridStrategy:
                 # 매수 신호
                 if symbol not in self.positions:
                     logger.info(f"\n🔔 [실시간] 매수 신호: {stock.name}")
-                    logger.info(f"   현재가: {stock.price:,}원")
+                    logger.info(f"   현재가: {int(stock.price):,}원")
                     logger.info(f"   MA{self.short_ma}: {stock.ma_short:,.0f} > MA{self.long_ma}: {stock.ma_long:,.0f}")
-                    self._execute_buy(symbol, stock.name, stock.price)
+                    self._execute_buy(symbol, stock.name, int(stock.price))
         
         # 데드크로스 체크 (단기 MA가 장기 MA 하향 돌파)
         elif stock.ma_short < stock.ma_long:
             if symbol in self.positions:
                 logger.info(f"\n🔔 [실시간] 매도 신호: {stock.name}")
-                logger.info(f"   현재가: {stock.price:,}원")
-                self._execute_sell(symbol, stock.name, stock.price, "SIGNAL")
+                logger.info(f"   현재가: {int(stock.price):,}원")
+                self._execute_sell(symbol, stock.name, int(stock.price), "SIGNAL")
+    
+    def _check_take_profit_stop_loss(self, symbol: str, current_price: int):
+        """실시간 익절/손절 체크"""
+        if symbol not in self.positions:
+            return
+        
+        position = self.positions[symbol]
+        entry_price = int(position['entry_price'])
+        name = position['name']
+        
+        # 수익률 계산
+        gross_pnl_pct = (current_price - entry_price) / entry_price * 100
+        
+        # 손절 체크
+        stop_loss_pct = ma_config.stop_loss_pct  # 기본값: -1.0%
+        if gross_pnl_pct <= stop_loss_pct:
+            logger.info(f"\n🛑 [실시간] 손절 신호: {name}")
+            logger.info(f"   현재가: {current_price:,}원 | 수익률: {gross_pnl_pct:+.2f}% <= 손절기준 {stop_loss_pct}%")
+            self._execute_sell(symbol, name, current_price, "STOP_LOSS")
+            return
+        
+        # 익절 체크 (손익분기점 초과 시)
+        if gross_pnl_pct >= self.break_even_rate:
+            logger.info(f"\n💰 [실시간] 익절 신호: {name}")
+            logger.info(f"   현재가: {current_price:,}원 | 수익률: {gross_pnl_pct:+.2f}% >= 손익분기 {self.break_even_rate:.2f}%")
+            self._execute_sell(symbol, name, current_price, "TAKE_PROFIT")
     
     def _start_polling_thread(self):
         """폴링 스레드 시작"""
         self._polling_thread = threading.Thread(target=self._polling_loop, daemon=True)
         self._polling_thread.start()
         logger.info(f"📊 폴링 스레드 시작 (10분 간격, {len(self.polling_stocks)}개 종목)")
+    
+    def _start_monitor_thread(self):
+        """WebSocket 모니터링 스레드 시작"""
+        self._monitor_thread = threading.Thread(target=self._monitor_websocket, daemon=True)
+        self._monitor_thread.start()
+        logger.info(f"🔍 WebSocket 모니터링 스레드 시작 (타임아웃: {self._websocket_timeout_sec}초)")
     
     def _polling_loop(self):
         """폴링 루프 (10분봉 분석)"""
@@ -337,30 +504,70 @@ class HybridStrategy:
                 'entry_time': datetime.now()
             }
             self.orders_placed += 1
-            logger.info(f"   ✅ 매수 완료")
+            
+            # 잔고 조회 및 표시
+            balance = self.client.get_balance()
+            if balance:
+                logger.info(f"   ✅ 매수 완료 | 현재 잔고: {balance.get('cash', 0):,}원 | 총평가: {balance.get('total_value', 0):,}원")
+            else:
+                logger.info(f"   ✅ 매수 완료")
         else:
             logger.error(f"   ❌ 매수 실패")
     
     def _execute_sell(self, symbol: str, name: str, price: int, reason: str):
-        """매도 실행"""
+        """매도 실행 (수수료 고려)"""
         if symbol not in self.positions:
             return
         
         position = self.positions[symbol]
-        entry_price = position['entry_price']
-        quantity = position['quantity']
-        pnl_pct = (price - entry_price) / entry_price * 100
+        entry_price = int(position['entry_price'])
+        quantity = int(position['quantity'])
+        gross_pnl_pct = (price - entry_price) / entry_price * 100
         
-        pnl_emoji = "📈" if pnl_pct > 0 else "📉"
+        # 수수료 고려 순수익 계산
+        profit_info = self.fee_config.calculate_net_profit(entry_price, price, quantity)
+        net_pnl_pct = profit_info['net_profit_rate']
+        
+        # 수수료 고려 수익성 체크 (손절은 예외)
+        if self.fee_config.use_fee_aware_sell and reason == "SIGNAL":
+            stop_loss_pct = ma_config.stop_loss_pct  # 기본값: -1.0%
+            
+            # 1. 손절 기준 이하면 즉시 매도 (큰 손실 방지)
+            if gross_pnl_pct <= stop_loss_pct:
+                logger.info(f"   🛑 손절 실행 ({name}): 수익률 {gross_pnl_pct:+.2f}% <= 손절기준 {stop_loss_pct}%")
+                # 손절은 아래로 계속 진행
+            
+            # 2. 소폭 손실 시 매도 보류 (반등 기회 대기)
+            elif gross_pnl_pct < 0:
+                logger.info(f"   ⏸️ 매도 보류 ({name}): 소폭 손실 {gross_pnl_pct:+.2f}% (손절기준: {stop_loss_pct}%)")
+                logger.info(f"      반등 대기 중...")
+                self.fee_saved_count += 1
+                return
+            
+            # 3. 수익이지만 손익분기점 미달 시 매도 보류
+            elif gross_pnl_pct > 0 and gross_pnl_pct < self.break_even_rate:
+                logger.info(f"   ⏸️ 매도 보류 ({name}): 수익률 {gross_pnl_pct:+.2f}% < 손익분기 {self.break_even_rate:.2f}%")
+                logger.info(f"      수수료 차감 시 손실 예상 (순수익률: {net_pnl_pct:+.2f}%)")
+                self.fee_saved_count += 1
+                return
+        
+        pnl_emoji = "📈" if net_pnl_pct > 0 else "📉"
         logger.info(f"   💸 매도 주문 ({reason}): {name} {quantity}주")
-        logger.info(f"      {pnl_emoji} {entry_price:,}원 → {price:,}원 ({pnl_pct:+.2f}%)")
+        logger.info(f"      {pnl_emoji} {entry_price:,}원 → {price:,}원")
+        logger.info(f"      총수익: {gross_pnl_pct:+.2f}% | 수수료: {profit_info['total_fee']:,}원 | 순수익: {net_pnl_pct:+.2f}%")
         
         order = self.client.sell_market_order(symbol, quantity)
         
         if order:
             del self.positions[symbol]
             self.orders_placed += 1
-            logger.info(f"   ✅ 매도 완료")
+            
+            # 잔고 조회 및 표시
+            balance = self.client.get_balance()
+            if balance:
+                logger.info(f"   ✅ 매도 완료 (순수익: {profit_info['net_profit']:,}원) | 현재 잔고: {balance.get('cash', 0):,}원 | 총평가: {balance.get('total_value', 0):,}원")
+            else:
+                logger.info(f"   ✅ 매도 완료 (순수익: {profit_info['net_profit']:,}원)")
         else:
             logger.error(f"   ❌ 매도 실패")
     
@@ -372,7 +579,8 @@ class HybridStrategy:
             'polling_stocks': len(self.polling_stocks),
             'subscriptions': len(self._subscriptions),
             'positions': len(self.positions),
-            'orders_placed': self.orders_placed
+            'orders_placed': self.orders_placed,
+            'fee_saved_count': self.fee_saved_count  # 수수료로 인해 스킵한 매도 횟수
         }
 
 

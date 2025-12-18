@@ -115,6 +115,120 @@ class LogConfig:
 
 
 @dataclass
+class TransactionFeeConfig:
+    """
+    거래 수수료 설정 클래스
+    Transaction Fee Configuration Class
+    
+    한국 주식 거래 수수료 구조:
+    - 매수: 증권사 수수료만
+    - 매도: 증권사 수수료 + 거래세 + 농특세
+    
+    Korean stock transaction fee structure:
+    - Buy: Brokerage commission only
+    - Sell: Brokerage commission + Securities transaction tax + Agricultural tax
+    """
+    
+    # 증권사 수수료 (Brokerage Commission)
+    # 일반적으로 0.015% ~ 0.5% (증권사/거래 유형별 상이)
+    # MTS/HTS 기준 약 0.015% ~ 0.05%
+    commission_rate: float = float(os.getenv("COMMISSION_RATE", "0.015"))  # 0.015% (한국투자증권 MTS 기준)
+    
+    # 거래세 (Securities Transaction Tax) - 매도 시에만 부과
+    # 코스피: 0.05% (2023년 기준, 향후 인하 예정)
+    # 코스닥: 0.20% (2023년 기준)
+    tax_rate_kospi: float = float(os.getenv("TAX_RATE_KOSPI", "0.18"))  # 0.18% (거래세 0.03% + 농특세 0.15%)
+    tax_rate_kosdaq: float = float(os.getenv("TAX_RATE_KOSDAQ", "0.18"))  # 0.18% (거래세 0.18%, 농특세 없음)
+    
+    # 기본 시장 (Default Market)
+    default_market: str = os.getenv("DEFAULT_MARKET", "kospi")  # "kospi" or "kosdaq"
+    
+    # 최소 수익률 기준 (수수료 고려)
+    # Minimum profit threshold (considering fees)
+    # 왕복 수수료를 커버하기 위한 최소 수익률
+    min_profit_threshold: float = float(os.getenv("MIN_PROFIT_THRESHOLD", "0.5"))  # 0.5%
+    
+    # 수수료 고려 매도 활성화
+    use_fee_aware_sell: bool = os.getenv("USE_FEE_AWARE_SELL", "true").lower() == "true"
+    
+    def get_total_buy_fee(self) -> float:
+        """
+        매수 시 총 수수료율 반환 (%)
+        Returns total buy fee rate (%)
+        """
+        return self.commission_rate
+    
+    def get_total_sell_fee(self, market: str = None) -> float:
+        """
+        매도 시 총 수수료율 반환 (%)
+        Returns total sell fee rate (%)
+        
+        Args:
+            market: "kospi" or "kosdaq" (None이면 default_market 사용)
+        """
+        market = market or self.default_market
+        tax_rate = self.tax_rate_kospi if market == "kospi" else self.tax_rate_kosdaq
+        return self.commission_rate + tax_rate
+    
+    def get_round_trip_fee(self, market: str = None) -> float:
+        """
+        왕복 거래 수수료율 반환 (매수 + 매도) (%)
+        Returns round-trip fee rate (buy + sell) (%)
+        """
+        return self.get_total_buy_fee() + self.get_total_sell_fee(market)
+    
+    def calculate_break_even_rate(self, market: str = None) -> float:
+        """
+        손익분기 수익률 계산 (%)
+        Calculate break-even profit rate (%)
+        
+        이 수익률 이상이어야 수수료 차감 후 수익 발생
+        """
+        return self.get_round_trip_fee(market)
+    
+    def calculate_net_profit(self, entry_price: int, exit_price: int, quantity: int, market: str = None) -> dict:
+        """
+        순수익 계산 (수수료 차감 후)
+        Calculate net profit after fees
+        
+        Args:
+            entry_price: 매수가
+            exit_price: 매도가
+            quantity: 수량
+            market: 시장 구분
+        
+        Returns:
+            dict: {gross_profit, buy_fee, sell_fee, net_profit, net_profit_rate}
+        """
+        buy_amount = entry_price * quantity
+        sell_amount = exit_price * quantity
+        
+        buy_fee = buy_amount * (self.get_total_buy_fee() / 100)
+        sell_fee = sell_amount * (self.get_total_sell_fee(market) / 100)
+        
+        gross_profit = sell_amount - buy_amount
+        net_profit = gross_profit - buy_fee - sell_fee
+        net_profit_rate = (net_profit / buy_amount) * 100 if buy_amount > 0 else 0
+        
+        return {
+            "gross_profit": int(gross_profit),
+            "buy_fee": int(buy_fee),
+            "sell_fee": int(sell_fee),
+            "total_fee": int(buy_fee + sell_fee),
+            "net_profit": int(net_profit),
+            "net_profit_rate": round(net_profit_rate, 2)
+        }
+    
+    def is_profitable_trade(self, entry_price: int, exit_price: int, market: str = None) -> bool:
+        """
+        수수료 고려 시 수익 거래인지 확인
+        Check if trade is profitable after fees
+        """
+        gross_rate = ((exit_price - entry_price) / entry_price) * 100
+        return gross_rate > self.calculate_break_even_rate(market)
+
+
+@dataclass
 class MACrossoverConfig:
     """
     이동평균선 크로스오버 전략 설정 클래스
@@ -341,7 +455,7 @@ class MACrossoverConfig:
                 "001040": "CJ",
                 "000880": "한화",
                 "011170": "롯데케미칼",
-                "010620": "현대미포조선",
+                # "010620": "현대미포조선",  # 조회 실패
                 "241560": "두산밥캣",
                 "161390": "한국타이어앤테크놀로지",
                 "028050": "삼성엔지니어링",
@@ -350,7 +464,7 @@ class MACrossoverConfig:
                 "000120": "CJ대한통운",
                 "071050": "한국금융지주",
                 "029780": "삼성카드",
-                "003410": "쌍용C&E",
+                # "003410": "쌍용C&E",  # 조회 실패
                 "001450": "현대해상",
                 "000240": "한국앤컴퍼니",
                 "002380": "KCC",
@@ -363,7 +477,7 @@ class MACrossoverConfig:
                 "161890": "한국콜마",
                 "039490": "키움증권",
                 "001120": "LX인터내셔널",
-                "003620": "쌍용양회",
+                # "003620": "쌍용양회",  # 조회 실패
             }
     
     def get_stocks(self, group: str = "cosmetics") -> dict:
@@ -585,6 +699,7 @@ class MomentumBreakoutConfig:
 kis_config = KISConfig()
 trading_config = TradingConfig()
 log_config = LogConfig()
+fee_config = TransactionFeeConfig()
 ma_config = MACrossoverConfig()
 momentum_config = MomentumBreakoutConfig()
 dmv_config = DualMomentumVolatilityConfig()
@@ -626,6 +741,14 @@ def print_config_status():
     print(f"   RSI Overbought/Oversold: {ma_config.rsi_overbought}/{ma_config.rsi_oversold}")
     print(f"   Lookback Days: {ma_config.lookback_days}일")
     print(f"   Target Stocks: {len(ma_config.COSMETICS_STOCKS)}개 화장품주")
+    print("-" * 50)
+    print("💰 Transaction Fee Settings:")
+    print(f"   Commission Rate: {fee_config.commission_rate}%")
+    print(f"   Tax Rate (KOSPI): {fee_config.tax_rate_kospi}%")
+    print(f"   Tax Rate (KOSDAQ): {fee_config.tax_rate_kosdaq}%")
+    print(f"   Round-trip Fee: {fee_config.get_round_trip_fee():.3f}%")
+    print(f"   Break-even Rate: {fee_config.calculate_break_even_rate():.3f}%")
+    print(f"   Min Profit Threshold: {fee_config.min_profit_threshold}%")
     print("=" * 50)
 
 

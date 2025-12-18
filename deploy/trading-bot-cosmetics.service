@@ -1,5 +1,5 @@
 [Unit]
-Description=KIS Trading Bot - Cosmetics Strategy
+Description=KIS Trading Bot - Cosmetics Trend-Following Strategy (50/200 SMA)
 After=network-online.target
 Wants=network-online.target
 
@@ -9,15 +9,15 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/python_program_trade
 Environment="PATH=/home/ubuntu/python_program_trade/venv/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=/home/ubuntu/python_program_trade/venv/bin/python3 main.py --ma-minute --stocks cosmetics
+ExecStart=/home/ubuntu/python_program_trade/venv/bin/python3 run_cosmetics_strategy.py live
 Restart=always
 RestartSec=10
 StandardOutput=append:/home/ubuntu/python_program_trade/logs/bot_cosmetics.log
 StandardError=append:/home/ubuntu/python_program_trade/logs/bot_cosmetics_error.log
 
 # 리소스 제한
-MemoryMax=200M
-CPUQuota=20%
+MemoryMax=300M
+CPUQuota=30%
 
 [Install]
 WantedBy=multi-user.target
